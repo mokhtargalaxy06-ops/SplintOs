@@ -4,6 +4,8 @@
 #include "interrupts.h"
 #include "memory.h"
 #include "filesystem.h"
+#include "network.h"
+#include "security.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -29,6 +31,7 @@ enum open_file_type {
     OPEN_FILE_VFS,
     OPEN_FILE_PIPE_READ,
     OPEN_FILE_PIPE_WRITE,
+    OPEN_FILE_UDP,
 };
 
 struct open_file {
@@ -68,7 +71,13 @@ struct task {
     size_t io_count;
     int io_descriptor;
     uintptr_t user_break;
+    uintptr_t poll_entries;
+    size_t poll_count;
+    uint32_t poll_deadline;
 };
+
+struct process_poll_entry { int descriptor; uint32_t events, returned_events; };
+enum { POLL_READ = 1, POLL_WRITE = 2 };
 
 static struct task tasks[MAX_TASKS];
 static uint32_t current_index;
@@ -131,6 +140,8 @@ static void open_file_release(int index)
         }
         pipe_wake_waiters();
     }
+    else if (open_files[index].type == OPEN_FILE_UDP)
+        (void)udp_close(open_files[index].vfs_descriptor);
     open_files[index] = (struct open_file){0};
 }
 
@@ -309,6 +320,42 @@ static bool tick_reached(uint32_t now, uint32_t target)
     return (int32_t)(now - target) >= 0;
 }
 
+static uint32_t descriptor_ready_events(struct task *task, int descriptor)
+{
+    if (descriptor < 0 || descriptor >= TASK_DESCRIPTOR_COUNT ||
+        !task->descriptors[descriptor].used) return 0;
+    struct open_file *file = &open_files[task->descriptors[descriptor].open_file];
+    if (!file->used) return 0;
+    if (file->type == OPEN_FILE_CONSOLE)
+        return console_has_character() ? POLL_READ : 0;
+    if (file->type == OPEN_FILE_SERIAL) return POLL_WRITE;
+    if (file->type == OPEN_FILE_VFS) return POLL_READ | POLL_WRITE;
+    if (file->type == OPEN_FILE_UDP)
+        return POLL_WRITE | (udp_pending(file->vfs_descriptor) ? POLL_READ : 0);
+    int pipe_index = file->vfs_descriptor;
+    if (pipe_index < 0 || pipe_index >= PIPE_COUNT || !pipes[pipe_index].used) return 0;
+    if (file->type == OPEN_FILE_PIPE_READ)
+        return pipes[pipe_index].count != 0 || pipes[pipe_index].writers == 0
+            ? POLL_READ : 0;
+    if (file->type == OPEN_FILE_PIPE_WRITE)
+        return pipes[pipe_index].readers == 0 || pipes[pipe_index].count < PIPE_CAPACITY
+            ? POLL_WRITE : 0;
+    return 0;
+}
+
+static size_t poll_evaluate(struct task *task)
+{
+    struct process_poll_entry *entries =
+        (struct process_poll_entry *)task->poll_entries;
+    size_t ready = 0;
+    for (size_t i = 0; i < task->poll_count; ++i) {
+        entries[i].returned_events = entries[i].events &
+            descriptor_ready_events(task, entries[i].descriptor);
+        if (entries[i].returned_events != 0) ++ready;
+    }
+    return ready;
+}
+
 struct interrupt_frame *scheduler_tick(struct interrupt_frame *frame)
 {
     if (!scheduler_ready) return frame;
@@ -316,6 +363,18 @@ struct interrupt_frame *scheduler_tick(struct interrupt_frame *frame)
     for (uint32_t i = 1; i < MAX_TASKS; ++i)
         if (tasks[i].state == TASK_SLEEPING && tick_reached(now, tasks[i].wake_tick))
             tasks[i].state = TASK_READY;
+    uint32_t *active_space = tasks[current_index].address_space;
+    for (uint32_t i = 1; i < MAX_TASKS; ++i) {
+        if (tasks[i].state != TASK_POLL) continue;
+        address_space_activate(tasks[i].address_space);
+        size_t ready = poll_evaluate(&tasks[i]);
+        address_space_activate(active_space);
+        if (ready == 0 && !tick_reached(now, tasks[i].poll_deadline)) continue;
+        tasks[i].frame->eax = ready;
+        tasks[i].poll_entries = 0;
+        tasks[i].poll_count = 0;
+        tasks[i].state = TASK_READY;
+    }
 
     if (!force_reschedule && now % TIME_SLICE_TICKS != 0 &&
         tasks[current_index].state == TASK_RUNNING)
@@ -336,6 +395,21 @@ struct interrupt_frame *scheduler_tick(struct interrupt_frame *frame)
     }
     tasks[current_index].state = TASK_RUNNING;
     return frame;
+}
+
+struct interrupt_frame *scheduler_poll(struct interrupt_frame *frame,
+                                       uintptr_t entries, size_t count,
+                                       uint32_t timeout_ticks)
+{
+    if (count == 0) { frame->eax = 0; return frame; }
+    struct task *task = &tasks[current_index];
+    task->frame = frame;
+    task->poll_entries = entries;
+    task->poll_count = count;
+    task->poll_deadline = timer_ticks() + timeout_ticks;
+    task->state = TASK_POLL;
+    force_reschedule = true;
+    return scheduler_tick(frame);
 }
 
 struct interrupt_frame *scheduler_fault(struct interrupt_frame *frame)
@@ -377,9 +451,12 @@ struct interrupt_frame *scheduler_process_exit(struct interrupt_frame *frame,
         child->state = TASK_TERMINATED;
     }
     if (child->parent_id == 0) child->state = TASK_TERMINATED;
-    for (uint32_t i = 1; i < MAX_TASKS; ++i)
-        if (tasks[i].parent_id == child->id && tasks[i].state != TASK_UNUSED &&
-            tasks[i].state != TASK_TERMINATED) tasks[i].parent_id = 0;
+    for (uint32_t i = 1; i < MAX_TASKS; ++i) {
+        if (tasks[i].parent_id != child->id || tasks[i].state == TASK_UNUSED ||
+            tasks[i].state == TASK_TERMINATED) continue;
+        tasks[i].parent_id = 0;
+        if (tasks[i].state == TASK_ZOMBIE) tasks[i].state = TASK_TERMINATED;
+    }
     force_reschedule = true;
     return scheduler_tick(frame);
 }
@@ -391,7 +468,8 @@ struct interrupt_frame *scheduler_wait(struct interrupt_frame *frame,
     struct task *parent = &tasks[current_index];
     struct task *child = NULL;
     for (uint32_t i = 1; i < MAX_TASKS; ++i) {
-        if (tasks[i].parent_id == parent->id && tasks[i].id == child_id &&
+        if (tasks[i].parent_id == parent->id &&
+            (child_id == 0 || tasks[i].id == child_id) &&
             tasks[i].state != TASK_UNUSED && tasks[i].state != TASK_TERMINATED) {
             child = &tasks[i];
             break;
@@ -400,14 +478,35 @@ struct interrupt_frame *scheduler_wait(struct interrupt_frame *frame,
     if (child == NULL) { frame->eax = (uint32_t)-1; return frame; }
     if (child->state == TASK_ZOMBIE) {
         *(int *)status_address = child->exit_status;
+        uint32_t reaped_id = child->id;
         child->state = TASK_TERMINATED;
-        frame->eax = child_id;
+        frame->eax = reaped_id;
         return frame;
     }
     parent->frame = frame;
     parent->wait_child = child_id;
     parent->wait_status_address = status_address;
     parent->state = TASK_WAITING;
+    force_reschedule = true;
+    return scheduler_tick(frame);
+}
+
+struct interrupt_frame *scheduler_user_yield(struct interrupt_frame *frame)
+{
+    frame->eax = 0;
+    force_reschedule = true;
+    return scheduler_tick(frame);
+}
+
+struct interrupt_frame *scheduler_user_sleep(struct interrupt_frame *frame,
+                                             uint32_t ticks)
+{
+    if (ticks == 0) return scheduler_user_yield(frame);
+    if (ticks > 0x7FFFFFFFU) { frame->eax = (uint32_t)-1; return frame; }
+    tasks[current_index].frame = frame;
+    tasks[current_index].wake_tick = timer_ticks() + ticks;
+    tasks[current_index].state = TASK_SLEEPING;
+    frame->eax = 0;
     force_reschedule = true;
     return scheduler_tick(frame);
 }
@@ -536,9 +635,73 @@ int task_descriptor_fsync(int descriptor)
     return vfs_fsync(file->vfs_descriptor);
 }
 
+int task_descriptor_seek(int descriptor, size_t offset)
+{
+    if (descriptor < 0 || descriptor >= TASK_DESCRIPTOR_COUNT ||
+        !tasks[current_index].descriptors[descriptor].used) return -1;
+    struct open_file *file =
+        &open_files[tasks[current_index].descriptors[descriptor].open_file];
+    if (!file->used || file->type != OPEN_FILE_VFS) return -1;
+    return vfs_seek(file->vfs_descriptor, offset);
+}
+
+int task_descriptor_truncate(int descriptor, size_t size)
+{
+    if (descriptor < 0 || descriptor >= TASK_DESCRIPTOR_COUNT ||
+        !tasks[current_index].descriptors[descriptor].used) return -1;
+    struct open_file *file =
+        &open_files[tasks[current_index].descriptors[descriptor].open_file];
+    if (!file->used || file->type != OPEN_FILE_VFS) return -1;
+    return vfs_truncate(file->vfs_descriptor, size);
+}
+
+int task_udp_open(uint16_t local_port)
+{
+    if (local_port != 0 && local_port < 1024 &&
+        !security_has_capability(CAP_NETWORK_ADMIN)) return -1;
+    uint32_t descriptor;
+    for (descriptor = 3; descriptor < TASK_DESCRIPTOR_COUNT; ++descriptor)
+        if (!tasks[current_index].descriptors[descriptor].used) break;
+    if (descriptor == TASK_DESCRIPTOR_COUNT) return -1;
+    int socket = udp_open(local_port);
+    if (socket < 0) return -1;
+    int open_file = open_file_create(OPEN_FILE_UDP, socket);
+    if (open_file < 0) { (void)udp_close(socket); return -1; }
+    tasks[current_index].descriptors[descriptor] =
+        (struct task_descriptor){true, open_file};
+    return (int)descriptor;
+}
+
+static struct open_file *udp_file(int descriptor)
+{
+    if (descriptor < 0 || descriptor >= TASK_DESCRIPTOR_COUNT ||
+        !tasks[current_index].descriptors[descriptor].used) return NULL;
+    struct open_file *file =
+        &open_files[tasks[current_index].descriptors[descriptor].open_file];
+    return file->used && file->type == OPEN_FILE_UDP ? file : NULL;
+}
+
+int task_udp_send(int descriptor, const uint8_t address[4], uint16_t port,
+                  const void *data, size_t length)
+{
+    struct open_file *file = udp_file(descriptor);
+    return file == NULL ? -1 : udp_send(file->vfs_descriptor, address, port, data, length);
+}
+
+int task_udp_receive(int descriptor, void *data, size_t capacity,
+                     uint8_t address[4], uint16_t *port)
+{
+    struct open_file *file = udp_file(descriptor);
+    return file == NULL ? -1 : udp_receive(file->vfs_descriptor, data, capacity,
+                                           address, port);
+}
+
 int task_unlink(const char *path) { return vfs_unlink(path); }
 int task_rename(const char *old_path, const char *new_path)
 { return vfs_rename(old_path, new_path); }
+int task_mkdir(const char *path) { return vfs_mkdir(path); }
+int task_rmdir(const char *path) { return vfs_rmdir(path); }
+int task_chmod(const char *path, uint16_t mode) { return vfs_chmod(path, mode); }
 
 int task_descriptor_close(int descriptor)
 {
@@ -732,8 +895,21 @@ uintptr_t task_user_brk(uintptr_t requested)
     enum { HEAP_START = 0x80000000U, HEAP_LIMIT = 0x90000000U, PAGE_SIZE = 4096 };
     struct task *task = &tasks[current_index];
     if (requested == 0) return task->user_break;
-    if (requested < task->user_break || requested < HEAP_START || requested > HEAP_LIMIT)
+    if (requested < HEAP_START || requested > HEAP_LIMIT)
         return (uintptr_t)-1;
+    if (requested < task->user_break) {
+        uintptr_t first_unused = (requested + PAGE_SIZE - 1) &
+                                 ~(uintptr_t)(PAGE_SIZE - 1);
+        uintptr_t old_end = (task->user_break + PAGE_SIZE - 1) &
+                            ~(uintptr_t)(PAGE_SIZE - 1);
+        while (old_end > first_unused) {
+            old_end -= PAGE_SIZE;
+            if (!address_space_unmap_user(task->address_space, old_end))
+                return (uintptr_t)-1;
+        }
+        task->user_break = requested;
+        return requested;
+    }
     uintptr_t mapped = (task->user_break + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1);
     uintptr_t end = (requested + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1);
     while (mapped < end) {

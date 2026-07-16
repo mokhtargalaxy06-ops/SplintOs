@@ -107,6 +107,8 @@ int main(int argument_count, char **arguments)
     char startup[] = "cat /README";
     if (launch(startup) == 0)
         (void)write_text("shell: startup command status=0\r\n");
+    char orphan_test[] = "runner";
+    (void)launch(orphan_test);
     char descriptor_test[] = "fdtest";
     (void)launch(descriptor_test);
     char echo_test[] = "echo inherited standard output";

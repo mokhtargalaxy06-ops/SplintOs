@@ -12,7 +12,7 @@ int main(int argument_count, char **arguments)
 {
     (void)argument_count; (void)arguments;
     struct splint_process_info info;
-    if (sys_process_info(&info) < 0) return 1;
+    if (sys_process_info(&info) < 0 || sys_getuid() != 0) return 1;
     char output[64] = "processes: active="; size_t position = 18;
     position = append_number(output, position, info.process_count);
     output[position++] = ' '; output[position++] = 'p'; output[position++] = 'i';

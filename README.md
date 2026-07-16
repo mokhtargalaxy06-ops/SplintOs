@@ -22,9 +22,18 @@ SplintOS currently provides:
 - 800x600 graphical desktop with a software compositor and mouse pointer
 - Interactive Network, Files, and About windows
 - Preemptive multitasking plus isolated Ring 3 ELF32 processes
+- Ring 3 voluntary yield and timer-backed sleep syscalls
+- Explicit-frequency Ring 3 monotonic clock
+- Validated read-only CMOS wall-clock snapshots for Ring 3
+- Fixed-layout Ring 3 system and machine identity
 - Physical page allocation, paging, and a coalescing kernel heap
 - Writable RAM filesystem with files, directories, permissions, and `/dev`
+- Ring 3 checked creation and removal of empty RAMFS directories
+- Ownership-checked Ring 3 permission changes
+- Read-only Ring 3 process identity lookup
 - Generic block devices, a bounded write-back cache, and checked MBR partitions
+- Deterministic block-write fault injection for storage error-path tests
+- Boot-time proof that interrupted filesystem metadata commits fail closed
 - A small educational disk filesystem mounted through the VFS at `/disk`
 - Legacy VirtIO block support with an automated two-boot persistence test
 - Interactive serial command shell with file, memory, task, network, hardware,
@@ -32,27 +41,34 @@ SplintOS currently provides:
 - Defensive ELF32 loader with separately built `/bin/hello` and `/bin/cat`
   Ring 3 programs
 - Checked user file syscalls backed by process-owned descriptor tables
+- Shared-offset descriptor seeking with bounds checks
+- Checked path metadata lookup using fixed-width VFS records
+- Writable descriptor truncation with zero-filled persistent growth
 - Bounded argument stacks plus `spawn` and blocking `wait`
 - Ring 3 command shell with event-driven keyboard and serial input
 - Reference-counted open files, inherited standard streams, and `dup2`
 - Separate Ring 3 `/bin/echo` and descriptor-lifecycle test programs
 - Bounded blocking pipes with EOF and peer-close wake-up behavior
+- Bounded multi-descriptor polling with timer deadlines
 - Atomic child descriptor actions, shell redirection, and two-process pipelines
 - Ring 3 `wc`, `ls`, `mem`, `uptime`, and `ps` commands
-- Page-backed userspace `brk` and a small bump allocator
+- Page-backed userspace `brk` with reusable `malloc`/`free`/`calloc`/`realloc`
 - Selectable trusted recovery console from the GRUB menu
 - PS/2 keyboard and mouse input plus COM1 serial diagnostics
+- A bounded 4 KiB in-memory boot and diagnostic log
+- Checked Ring 3 access to bounded diagnostic-log snapshots
 - PCI device enumeration and ACPI RSDP/RSDT discovery
 - RTL8139 Ethernet with ARP, IPv4, ICMP ping, UDP, and DHCP
+- Capability-checked descriptor-backed Ring 3 UDP send/receive and polling
 - Stack-smashing protection, task identities, capabilities, and VFS permissions
 - Automated ELF, Multiboot, and headless QEMU boot tests
 
 SplintOS is still an experimental educational OS. It cannot run Linux
 applications or use most real Wi-Fi, USB,
 audio, and GPU hardware. Its Ring 3 ELF32 environment remains intentionally
-small: pipelines are simple, the heap cannot free memory, and the C library is
-minimal. DNS, TCP, TLS, HTTP, persistent storage, and modern hardware drivers
-remain future work.
+small: pipelines are simple, and the C library is
+minimal. TCP, TLS, HTTP, additional filesystems, and modern hardware drivers
+remain future work; bounded DNS and persistent VirtIO storage are available.
 
 ## Graphical desktop
 
@@ -126,11 +142,15 @@ Boot creates `/dev`, `/etc`, `/tmp`, `/etc/motd`, `/README`, `/dev/null`, and a
 serial output device at `/dev/serial`.
 
 RAM filesystem contents disappear when the machine powers off. A generic block
-layer, 16-sector write-back cache, checked MBR parser, and compact `SPLFS3`
-educational filesystem now run over `ramblk0`. `SPLFS3` is mounted at `/disk`;
+layer, 16-sector write-back cache, checked MBR parser, and compact `SPLFS4`
+educational filesystem now run over `ramblk0`. `SPLFS4` is mounted at `/disk`;
 Ring 3 programs use normal file descriptors and can explicitly flush dirty
-blocks. The versioned `SPLFS3` layout stores eight flat files of at most 4 KiB
-each in dynamically placed contiguous extents. A legacy VirtIO block
+blocks. The versioned `SPLFS4` layout stores eight flat files of at most 4 KiB
+each in dynamically placed contiguous extents. A checked allocation bitmap,
+metadata checksums, and clean/dirty transaction state detect allocation drift
+and interrupted metadata commits. A dirty image whose previous checksummed
+directory remains intact can be inspected through a strictly read-only mount.
+A legacy VirtIO block
 driver provides persistent storage under QEMU; `ramblk0` remains the fallback
 and deterministic conformance device. Unknown hardware partitions are probed
 read-only and never formatted automatically. Checked `unlink` removes closed
@@ -166,10 +186,17 @@ demultiplexes incoming UDP datagrams by local port, and provides eight bounded
 UDP sockets with send/receive operations. DHCP discovery starts when RTL8139
 initialization completes; offers trigger a request and acknowledgements replace
 the `10.0.2.15` fallback address. The `net` shell command reports the result.
+IPv4 loopback delivery supports deterministic local UDP tests without a peer.
+DHCP also supplies subnet, gateway, and DNS state used for next-hop routing and
+available to Ring 3 through a fixed-layout configuration snapshot.
 
-UDP payloads are currently capped at 512 bytes with one queued datagram per
-socket. Routing tables, DNS, TCP, TLS, Wi-Fi, and HTTP remain later networking
-milestones.
+UDP payloads are capped at 512 bytes with four queued datagrams per socket.
+Passing local port zero requests a collision-checked ephemeral port from the
+IANA dynamic range, which client libraries such as DNS use automatically.
+The userspace library includes a bounded IPv4 DNS resolver. It validates labels,
+uses the DHCP-provided server, retries while ARP resolution settles, waits with a
+finite poll timeout, and accepts only checked A/IN answers. Routing tables, TCP,
+TLS, Wi-Fi, and HTTP remain later networking milestones.
 
 ## Hardware discovery
 
@@ -256,7 +283,10 @@ make check
 `make test` verifies the Multiboot header, ELF formats, entry address, required
 symbols, and absence of unresolved references. `make test-boot` creates the ISO,
 boots it headlessly, and asserts serial milestones without a panic.
-`make test-storage` performs persistent and corrupted-image VirtIO boots.
+`make test-storage` performs persistent VirtIO boots and non-destructive probes
+of unknown, structurally corrupt, checksum-invalid, and bitmap-invalid images,
+plus hash-verified read-only recovery of safe dirty images. Boundary fixtures
+distinguish recoverable bitmap drift from unsafe directory drift.
 `make debug` waits for GDB on TCP port 1234.
 
 GitHub Actions runs both static and headless boot checks. See

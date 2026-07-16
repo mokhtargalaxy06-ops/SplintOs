@@ -16,5 +16,8 @@ int udp_send(int socket, const uint8_t destination_ip[4], uint16_t destination_p
              const void *data, size_t length);
 void network_address(uint8_t address[4]);
 bool network_dhcp_configured(void);
+bool udp_pending(int socket);
+void network_configuration(uint8_t address[4], uint8_t subnet[4],
+                           uint8_t gateway[4], uint8_t dns[4]);
 
 #endif

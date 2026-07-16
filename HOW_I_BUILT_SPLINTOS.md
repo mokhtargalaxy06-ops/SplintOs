@@ -557,6 +557,358 @@ The image builder now includes a fixture that changes one otherwise-unused
 directory byte without updating the checksum. QEMU must reject it, avoid a
 kernel panic, and leave its full-image SHA-256 unchanged.
 
+## 51. I added checked allocation metadata
+
+I introduced `SPLFS4`, reserving one sector for a 4,096-bit allocation bitmap.
+The superblock now records fixed geometry, feature flags, clean/dirty state,
+and separate FNV-1a checksums for the directory and bitmap. Mount reconstructs
+allocation from every validated extent and rejects any bitmap disagreement.
+
+Metadata commits persist a dirty marker before the bitmap and directory, then
+publish a clean superblock with matching checksums. Failed commits disable the
+mount. The storage suite now includes non-destructive bitmap-corruption and
+dirty-transaction fixtures, and it clears old serial logs before every boot so
+assertions cannot pass using stale output.
+
+## 52. I added deterministic block write failures
+
+The generic block layer can now fail writes to one selected device after a
+bounded number of successful writes. The boot conformance path uses `ramblk0`
+to prove that cache flush reports the injected error, retains dirty data, and
+successfully drains it after the fault is cleared. The headless boot test
+requires the new serial milestone, making this error path part of routine CI.
+
+## 53. I tested interrupted filesystem commits
+
+The RAM-backed diskfs conformance path now injects failures after successive
+successful device writes while creating a file. It requires at least one
+failed partial metadata commit to be rejected by a fresh mount, then clears the
+fault, reformats the teaching filesystem, and proves clean mounting still
+works. The headless QEMU test requires this interrupted-commit milestone.
+
+## 54. I added conservative read-only recovery
+
+`SPLFS4` now distinguishes a dirty but unchanged directory from unsafe partial
+metadata. If the superblock's recorded directory checksum still matches and
+every entry is structurally valid, mount reconstructs allocation state in
+memory and enters read-only mode. All mutating diskfs operations and flushes
+fail. If the directory changed or is malformed, mount remains unavailable.
+
+The dirty-image QEMU test now requires the read-only recovery diagnostic, sees
+the Ring 3 create attempt fail, and compares whole-image SHA-256 hashes before
+and after boot to prove recovery wrote nothing.
+
+## 55. I separated dirty metadata boundaries
+
+The image builder now creates dirty filesystems with no metadata drift,
+bitmap-only drift, and directory drift. QEMU recovers the first two read-only
+because the old checksummed directory remains authoritative, rejects the third,
+and leaves all three complete-image SHA-256 hashes unchanged.
+
+## 56. I made userspace heap blocks reusable
+
+The freestanding allocator now records aligned in-band block headers, reuses
+freed blocks with first-fit search, splits oversized blocks, rejects repeated
+or foreign frees by walking known headers, and coalesces adjacent free blocks.
+The Ring 3 heap test proves address reuse and two-sided coalescing. The allocator
+still grows through `brk` and does not return pages to the kernel.
+
+## 57. I returned userspace heap pages
+
+The `brk` implementation now supports shrinking. It removes complete user pages
+above the requested break, invalidates their translations, frees empty page
+tables, and returns physical pages to the allocator. When the userspace
+allocator frees its final block, it contracts the break to that block's header.
+The Ring 3 test grows a multi-page tail allocation and verifies the break moves
+backward after `free` while earlier live allocations remain writable.
+
+## 58. I completed the basic userspace allocator surface
+
+The userspace runtime now includes overflow-checked `calloc` and checked
+`realloc`. Resize consumes an adjacent free block when it fits; otherwise it
+allocates a new block, copies the complete old payload, and frees the original.
+The Ring 3 test verifies zero initialization and byte-for-byte preservation
+while growing from 128 to 512 bytes.
+
+## 59. I retained a bounded boot log
+
+The serial diagnostic path now mirrors every emitted byte into a 4 KiB
+overwrite-on-full ring. Snapshot reads return the newest available bytes in
+chronological order without exposing internal storage. Device initialization
+performs a readback check, and the headless boot suite requires its milestone.
+
+## 60. I exposed checked diagnostic snapshots
+
+Syscall 23 copies at most 512 of the newest boot-log bytes through a checked
+writable user range and a bounded kernel staging buffer. It exposes neither
+kernel pointers nor mutable log state. The Ring 3 heap test retrieves a snapshot
+and verifies that it contains a SplintOS diagnostic marker.
+
+## 61. I closed the orphan-zombie leak
+
+Process exit already reparented live children to the kernel, but a child that
+became a zombie before its parent exited retained a task slot forever. The
+scheduler now makes those zombies reclaimable during reparenting. `runner`
+deliberately leaves three children uncollected; the shell then launches its full
+suite, proving the bounded task table remains usable.
+
+## 62. I completed wait-for-any-child
+
+The scheduler's wake path already treated child ID zero as a wildcard, but its
+initial child lookup required an impossible literal ID zero and its immediate
+zombie path returned zero instead of the collected process ID. Both paths now
+return the actual child. `runner` spawns two concurrent children and collects
+both through `wait(0)` before exercising orphan cleanup.
+
+## 63. I added Ring 3 yield and sleep
+
+Syscalls 17 and 18 expose voluntary scheduling and timer-backed sleeping. The
+scheduler retains the syscall frame, marks the process sleeping, and wakes it
+through the existing wrap-safe tick comparison. Durations above half the
+32-bit counter range are rejected. `runner` verifies yield and a 100-tick sleep
+by observing uptime advance.
+
+## 64. I exposed descriptor seek
+
+Syscall 19 routes seek through the process descriptor and shared open-file
+layers into the existing bounded VFS operation. Devices and pipes reject it,
+and offsets cannot pass the current end of file. `fdtest` writes a temporary
+file, duplicates its descriptor, seeks through one reference, and reads the
+expected bytes through the other to prove shared-offset semantics.
+
+## 65. I added path metadata lookup
+
+Syscall 24 resolves a bounded copied path and returns the same fixed-layout
+name, type, size, mode, and owner record used by directory listings. The record
+is assembled in kernel memory only after the destination range is validated.
+`fdtest` verifies a newly written file reports file type and exact size before
+unlinking it.
+
+## 66. I added fixed system identity
+
+Syscall 25 returns bounded 16-byte system, release, and machine fields. The
+kernel validates the complete writable destination before copying the constant
+record, so no internal pointer or unterminated host string crosses the ABI.
+The Ring 3 uptime program verifies the SplintOS and i686 identifiers.
+
+## 67. I added checked descriptor truncation
+
+Syscall 26 resizes writable regular files. RAMFS reserves and zeroes growth;
+disk files use the checked `SPLFS4` rewrite and commit path. Shrinking clamps
+all open VFS offsets referencing the node. `fdtest` verifies shrink metadata,
+while the persistent Ring 3 disk workflow grows a six-byte file to 600 bytes
+and verifies every added byte is zero before reclaiming the extent.
+
+## 68. I completed empty-directory lifecycle
+
+Syscalls 27 and 28 expose VFS directory creation and removal. Removal refuses
+root, mount points, non-directories, non-empty directories, and parent
+permission failures before releasing the node. `fdtest` creates a temporary
+directory, verifies its metadata type, removes it, and proves lookup fails.
+
+## 69. I exposed checked permission changes
+
+Syscall 29 copies a bounded path, rejects mode bits outside `0777`, and routes
+changes through the VFS ownership-or-capability check and security audit. The
+descriptor test changes a temporary file to `0600` and confirms the exact mode
+through the fixed-layout metadata call.
+
+## 70. I exposed read-only process identity
+
+Syscall 30 returns the scheduler-owned numeric user ID without providing any
+identity mutation path. The Ring 3 process-information program verifies the
+normal boot suite runs under the expected root identity, while existing VFS
+ownership and capability checks remain authoritative.
+
+## 71. I tested true full-disk allocation
+
+The RAM conformance path formats a deliberately constrained 66-sector
+`SPLFS4` partition. Seven maximum-size extents leave one directory slot but
+only seven sectors free, so an eighth eight-sector allocation fails because of
+capacity rather than directory exhaustion. Unlinking one extent makes the same
+allocation succeed. Mount also rejects geometry beyond the bitmap's explicit
+4,096-sector coverage.
+
+## 72. I added blocking descriptor polling
+
+Syscall 31 accepts at most eight checked descriptor/event records and a bounded
+timer-tick timeout. It reports console, file, serial, pipe-data/EOF, and pipe
+capacity readiness. When nothing is ready, the scheduler retains the user
+array and syscall frame in `TASK_POLL` and reevaluates on timer ticks without
+busy-waiting. `pipetest` verifies immediate write readiness, absent read
+readiness, and a blocking read poll awakened by child output.
+
+## 73. I exposed the monotonic clock
+
+Syscall 32 returns the scheduler tick counter together with its explicit 100 Hz
+frequency. This avoids forcing userspace to infer units from whole-second
+uptime. `runner` takes snapshots around a 100-tick sleep and uses wrapping
+subtraction to prove at least the requested interval elapsed.
+
+## 74. I added hostile syscall regression coverage
+
+The Ring 3 descriptor test now deliberately supplies kernel-space source and
+destination pointers, an unknown poll mask, a timer duration outside the
+wrap-safe half range, and a heap break below its base. Each syscall must return
+`-1`, after which the same process continues through descriptor, metadata,
+permission, and directory tests. This catches validation regressions that a
+simple crash-only assertion would miss.
+
+## 75. I exposed descriptor-backed UDP
+
+UDP sockets now live in the same process descriptor and reference-counted
+open-file tables as files and pipes. Binding requires network-administration
+capability; final close releases the kernel socket. Syscalls 33–35 use bounded
+fixed endpoints and 512-byte kernel staging buffers for send and receive.
+Sockets participate in poll for queued datagrams and write readiness. `fdtest`
+binds port 40000, verifies readiness, broadcasts a three-byte datagram, and
+closes the descriptor.
+
+## 76. I added deterministic UDP loopback
+
+UDP sent to `127.0.0.1` or the interface's own address is delivered directly to
+a matching local socket while preserving source address and port. It uses the
+same bounded queue and poll readiness as hardware receive. `fdtest` sends four
+bytes between two process descriptors, waits for readiness, verifies the
+payload and endpoint, and closes both sockets.
+
+## 77. I queued UDP bursts without overwrite
+
+Each UDP socket now has a four-datagram FIFO with independent payload lengths
+and source endpoints. Receive removes the oldest entry, while a full queue
+drops a new arrival instead of overwriting unread data. The loopback test sends
+`one` and `two` before receiving and verifies FIFO ordering.
+
+## 78. I added DHCP-backed next-hop routing
+
+DHCP acknowledgements now retain options 1, 3, and 6 for subnet mask, default
+gateway, and DNS server. IPv4 UDP transmission ARPs the destination only when
+it is on-link; off-link traffic resolves the configured gateway while keeping
+the original IP destination. Syscall 36 returns a fixed 16-byte configuration
+snapshot, and Ring 3 verifies every fallback or DHCP field is populated.
+
+## 79. I added bounded userspace DNS resolution
+
+The Ring 3 networking library now constructs validated A-record queries for the
+DHCP-provided DNS server, retries transmission while ARP resolution settles,
+and waits through descriptor poll with a finite timeout. Its exported parser
+checks the transaction ID, DNS flags, bounded labels and compression pointers,
+question and answer extents, record class, type, and payload length. `fdtest`
+uses a synthetic compressed response so boot verification covers parsing without
+depending on an external resolver, while applications retain the real UDP query
+path.
+
+## 80. I hardened DNS compression boundaries
+
+Compressed names are skipped without recursive pointer traversal, but their
+14-bit targets must still identify a byte inside the received packet. The parser
+now rejects out-of-packet targets explicitly. Ring 3 regression cases also prove
+that truncated A data and mismatched transaction IDs fail safely, complementing
+the valid compressed-answer fixture.
+
+## 81. I verified UDP queue saturation
+
+The Ring 3 descriptor test now sends five loopback datagrams into the four-slot
+FIFO, verifies that the oldest four arrive in order, and confirms no fifth item
+is readable. Local transmission reports the accepted byte count even when the
+receiver drops for lack of space, preserving UDP's best-effort contract and
+matching the hardware receive path.
+
+## 82. I verified simultaneous UDP socket isolation
+
+The descriptor regression now keeps three UDP sockets open, rejects a duplicate
+local-port bind, and polls two receivers together. A datagram addressed to one
+port marks only that descriptor readable while the alternate remains idle. This
+closes the roadmap item for multiple UDP sockets and poll-based blocking or
+zero-timeout operation.
+
+## 83. I added ephemeral UDP port allocation
+
+Opening UDP with local port zero now selects a collision-free port from the
+49152–65535 dynamic range, wrapping and rescanning safely. DNS uses this kernel
+selection instead of deriving a port from the process ID. Ring 3 sends from an
+ephemeral socket and verifies the peer observes a source port in the dynamic
+range.
+
+## 84. I separated privileged and ordinary UDP binds
+
+UDP descriptors no longer require network-administration authority merely to
+act as clients or bind application ports. Only explicit ports below 1024 remain
+capability-gated; port zero and ports 1024–65535 follow normal descriptor and
+collision checks. This lets DNS and future clients run with reduced privilege
+without weakening service-port policy.
+
+## 85. I pinned DNS replies to the configured resolver
+
+The userspace DNS client now rejects a received datagram unless its source is
+port 53 at exactly the DHCP-provided DNS address. Transaction-ID and DNS-format
+validation then run as before. This closes the straightforward same-host UDP
+spoofing gap without adding protocol complexity to the kernel.
+
+## 86. I validated IPv4 checksums and fragments
+
+The receive path now verifies the complete variable-length IPv4 header checksum
+before learning from a packet or dispatching it. It also rejects nonzero fragment
+offsets and the more-fragments flag; silently treating fragments as complete
+transport packets would be incorrect until a bounded reassembly design exists.
+Existing version, header-size, frame-extent, and destination checks remain in the
+same early validation gate.
+
+## 87. I completed UDP checksum handling
+
+Outbound UDP now computes a one's-complement checksum across the IPv4 pseudo
+header, UDP header, and payload, translating a computed zero to the required
+all-ones wire value. Receive validates every nonzero checksum before DHCP or
+socket delivery, while accepting zero because IPv4 UDP explicitly uses it to
+mean that the sender omitted the checksum.
+
+## 88. I hardened ARP cache learning
+
+ARP receive now validates Ethernet and IPv4 protocol identifiers, canonical
+address lengths, request/reply opcodes, agreement between the ARP sender MAC and
+the enclosing Ethernet source, and a target equal to the local interface before
+learning. Zero-address probes can still be answered but are never cached. These
+checks reduce malformed and irrelevant cache updates while retaining a compact
+single-interface design.
+
+## 89. I enforced DHCP negotiation state
+
+DHCP now advances explicitly from discover to request to configured. Offers and
+acknowledgements must carry the expected hardware type and length, magic cookie,
+transaction ID, and client MAC. The request records the selected server, and an
+acknowledgement is accepted only when its server identifier matches, preventing
+unsolicited or cross-server packets from installing configuration.
+
+## 90. I hardened ICMP echo replies
+
+Echo handling now validates the one's-complement checksum across the entire ICMP
+message before replying. It also requires the IPv4 destination to be the local
+interface rather than broadcast, preventing the kernel from participating in
+broadcast amplification while retaining ordinary diagnostic pings.
+
+## 91. I added a clean filesystem unmount boundary
+
+`diskfs_unmount` now flushes writable media before making the mount inaccessible;
+a read-only recovery mount can detach without attempting writes. Boot conformance
+writes and flushes a multi-sector file, unmounts, proves access fails while
+offline, remounts the same partition, and verifies every byte. A future shutdown
+interface can call this boundary after coordinating open descriptors.
+
+## 92. I validated DHCP configuration values
+
+Negotiation no longer installs arbitrary four-byte options. The offered address,
+selected server, gateway, and DNS values must be usable unicast addresses, and
+the subnet mask must be nonzero and contiguous. Missing or malformed optional
+configuration retains the known QEMU-safe fallback rather than breaking routing.
+
+## 93. I exposed a validated CMOS wall clock
+
+Syscall 37 returns a stable RTC calendar snapshot without confusing it with the
+monotonic scheduler clock. The bounded reader waits out update-in-progress,
+retries across a seconds rollover, converts BCD or binary and 12- or 24-hour
+formats, applies a conservative century fallback, and validates every field.
+`fdtest` checks the complete Ring 3 structure under QEMU.
+
 ## Current result
 
 SplintOS now boots as its own freestanding x86 kernel and provides graphics,
@@ -570,9 +922,9 @@ system-information commands, a page-backed userspace heap, and a complete
 RAM-backed block/cache/partition/disk-filesystem path mounted at `/disk`.
 
 It is still an educational operating system rather than a replacement for a
-general-purpose desktop OS. The next major step is a VirtIO block driver so the
-existing storage stack survives emulator restarts. Broader hardware and network
-application support follows that hardware-backed storage foundation.
+general-purpose desktop OS. VirtIO-backed `SPLFS4` now survives emulator
+restarts; TCP is the next major application-networking step, alongside clean
+storage shutdown and broader hardware support.
 
 For feature details, build requirements, and the current support limits, see
 the main [README](README.md).

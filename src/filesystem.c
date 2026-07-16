@@ -183,6 +183,18 @@ static int node_create(const char *path, enum vfs_node_type type)
 int vfs_mkdir(const char *path) { return node_create(path, VFS_DIRECTORY); }
 int vfs_create(const char *path) { return node_create(path, VFS_FILE); }
 
+int vfs_rmdir(const char *path)
+{
+    uint16_t node = path_resolve(path);
+    if (node == NO_NODE || node == 0 || nodes[node].type != VFS_DIRECTORY ||
+        nodes[node].disk_mount || !permitted(&nodes[nodes[node].parent], 0200, 0002))
+        return -1;
+    for (uint16_t i = 1; i < MAX_NODES; ++i)
+        if (nodes[i].used && nodes[i].parent == node) return -1;
+    nodes[node] = (struct vfs_node){0};
+    return 0;
+}
+
 int vfs_open(const char *path, uint32_t flags)
 {
     uint16_t node = path_resolve(path);
@@ -306,6 +318,38 @@ int vfs_seek(int fd, size_t offset)
     return 0;
 }
 
+int vfs_truncate(int fd, size_t size)
+{
+    if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used ||
+        (descriptors[fd].flags & VFS_WRITE) == 0) return -1;
+    struct vfs_node *node = &nodes[descriptors[fd].node];
+    if (node->type != VFS_FILE || (node->disk_backed && size > DISKFS_FILE_SIZE))
+        return -1;
+    if (node->disk_backed) {
+        uint8_t *contents = kmalloc(DISKFS_FILE_SIZE);
+        if (contents == NULL) return -1;
+        for (size_t i = 0; i < DISKFS_FILE_SIZE; ++i) contents[i] = 0;
+        if (node->size != 0) {
+            int old_size = diskfs_read_file(node->name, contents, DISKFS_FILE_SIZE);
+            if (old_size < 0 || (size_t)old_size != node->size) {
+                kfree(contents); return -1;
+            }
+        }
+        int result = diskfs_write_file(node->name, contents, size);
+        kfree(contents);
+        if (result != 0) return -1;
+    } else {
+        if (!file_reserve(node, size)) return -1;
+        for (size_t i = node->size; i < size; ++i) node->data[i] = 0;
+    }
+    node->size = size;
+    uint16_t node_index = descriptors[fd].node;
+    for (int i = 0; i < MAX_DESCRIPTORS; ++i)
+        if (descriptors[i].used && descriptors[i].node == node_index &&
+            descriptors[i].offset > size) descriptors[i].offset = size;
+    return 0;
+}
+
 int vfs_fsync(int fd)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
@@ -375,6 +419,20 @@ int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capac
         ++count;
     }
     return (int)count;
+}
+
+int vfs_stat(const char *path, struct vfs_directory_entry *entry)
+{
+    if (entry == NULL) return -1;
+    uint16_t node = path_resolve(path);
+    if (node == NO_NODE) return -1;
+    *entry = (struct vfs_directory_entry){0};
+    name_copy(entry->name, nodes[node].name, string_length(nodes[node].name));
+    entry->type = nodes[node].type;
+    entry->size = nodes[node].size;
+    entry->mode = nodes[node].mode;
+    entry->owner = nodes[node].owner;
+    return 0;
 }
 
 int vfs_chmod(const char *path, uint16_t mode)

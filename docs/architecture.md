@@ -63,19 +63,54 @@ User programs call interrupt `0x80`. The current ABI provides:
 12 list(path, entries, capacity)
 13 memory_info(info)          15 process_info(info)
 14 uptime()                   16 brk(address)
+17 yield()                    18 sleep(ticks)
+19 seek(fd, offset)
 20 fsync(fd)
 21 unlink(path)
 22 rename(old_path, new_path)
+23 log_read(buffer, capacity)
+24 stat(path, entry)
+25 uname(identity)
+26 truncate(fd, size)
+27 mkdir(path)                28 rmdir(path)
+29 chmod(path, mode)
+30 getuid()
+31 poll(entries, count, timeout_ticks)
+32 clock_get(clock)
+33 udp_open(local_port)
+34 udp_send(fd, endpoint, data, length)
+35 udp_receive(fd, endpoint, data, capacity)
+36 network_config(configuration)
+37 wall_clock(clock)
 ```
 
 Pointers are checked against the caller's page tables. Strings and data are
 copied through bounded kernel buffers, so VFS never receives user pointers.
+Ring 3 regression coverage passes kernel-space pointers to write and stat,
+unknown poll-event bits, an ambiguous half-range timer deadline, and a break
+below the heap base; every call must return an error while the process survives.
+Path metadata uses the same fixed-width name, type, size, mode, and owner
+record as directory listing and is staged in kernel memory before copy-out.
+Directory creation inherits the VFS permission model. Removal rejects root,
+mount points, non-directories, and directories containing any child node.
+Permission changes accept only the low nine mode bits and require ownership or
+the kernel permission-change capability.
+Identity lookup is read-only and returns the scheduler-owned numeric user ID;
+there is no unprivileged identity-changing syscall.
+System identity is a fixed 48-byte record containing bounded system, release,
+and machine strings; it never exposes compiler or bootloader-owned storage.
 
 Each task owns a bounded descriptor table whose entries refer to shared,
 reference-counted open-file objects. Objects represent console input, serial
 output, or VFS files. Child creation retains standard streams; close, exit, and
 faults release them. A VFS handle closes only on the final release. `dup2`
 installs another reference and safely replaces an existing destination.
+Seek is restricted to VFS file objects and to offsets no larger than the
+current file size. Because duplicated descriptors reference the same open-file
+object, they intentionally share one seek position.
+Truncate requires a writable regular-file descriptor. Shrinking clamps every
+open VFS offset for the node; growth zero-fills new bytes. Disk-backed changes
+use the same checked `SPLFS4` metadata commit path.
 
 Descriptors `0`, `1`, and `2` are reserved for standard streams.
 Descriptor `0` reads from the keyboard and serial queue. An empty read places
@@ -84,6 +119,69 @@ the process in `TASK_IO_WAIT`; device input wakes it without polling.
 Pipe endpoints are open-file objects backed by bounded 256-byte rings. Empty
 reads and full writes enter scheduler wait states. Reads and writes wake peers,
 final-writer close produces EOF, and final-reader close makes writes fail.
+Ring 3 processes can also yield voluntarily or sleep for a bounded number of
+100 Hz timer ticks. Deadlines use wrap-safe comparison, and durations above
+half the 32-bit tick range are rejected.
+The monotonic clock call returns both the wrapping tick value and its explicit
+100 Hz frequency, allowing sub-second deadline calculations without assuming a
+platform-specific unit.
+The wall-clock call is deliberately separate. It takes a stable, bounded CMOS
+RTC snapshot, supports BCD or binary and 12- or 24-hour hardware formats, and
+returns validated calendar fields. It is read-only and does not provide elapsed
+time guarantees.
+Poll accepts at most eight checked descriptor records and a wrap-safe bounded
+timeout. Console input, VFS objects, serial output, pipe data/EOF, and pipe
+write capacity contribute readiness. A non-ready caller sleeps in `TASK_POLL`;
+the timer path reevaluates its descriptors without busy-waiting.
+UDP sockets now occupy normal process descriptors, inherit and close through
+the shared open-file lifecycle, and participate in poll. Ports below 1024
+require the network-administration capability; ephemeral and other unprivileged
+ports do not. Send/receive use fixed endpoints, 512-byte kernel staging buffers,
+and fully checked user ranges; receive is nonblocking after poll reports a
+queued datagram.
+DHCP acknowledgements now retain subnet mask, default gateway, and DNS server.
+Outbound IPv4 chooses the destination itself on-link and the gateway off-link,
+then resolves that next hop through ARP. Userspace receives a fixed 16-byte
+snapshot containing address, subnet, gateway, and DNS configuration.
+Inbound IPv4 validates version, header length, total frame extent, header
+checksum, destination, and fragmentation flags before learning ARP state or
+dispatching a protocol. Fragments are rejected until bounded reassembly exists.
+UDP transmission includes the IPv4 pseudo-header checksum. Receive validates
+every nonzero UDP checksum while continuing to accept zero, which IPv4 defines
+as an explicitly omitted UDP checksum.
+ARP accepts only Ethernet/IPv4 records with canonical address sizes, request or
+reply opcodes, a sender MAC matching the enclosing Ethernet frame, and a target
+equal to the local interface. Zero-address probes may receive a reply but are
+never learned into the bounded cache.
+DHCP advances through discover, request, and configured states. Replies must
+match the transaction, Ethernet hardware identity, DHCP magic cookie, and client
+MAC; an acknowledgement must also name the server selected by the accepted
+offer.
+Installed configuration additionally requires a usable offered address, a
+contiguous nonzero subnet mask, and usable gateway and DNS addresses. Missing or
+malformed optional values leave the documented QEMU-safe fallbacks intact.
+ICMP echo replies are generated only for unicast requests to the interface after
+validating the checksum across the complete ICMP message. Broadcast echo and
+malformed messages are discarded.
+Destination `127.0.0.1` and the interface's own address deliver directly to a
+matching local socket while preserving source address and port.
+Binding port zero selects an unused port from 49152–65535. The allocator scans
+for collisions and wraps inside that range; client libraries therefore avoid
+guessing process-derived source ports.
+Each socket owns a four-datagram FIFO. Receive removes the oldest datagram;
+when full, new arrivals are dropped instead of overwriting unread data. A local
+send still reports its accepted byte count because UDP cannot promise receiver
+delivery; this matches the observable contract of hardware transmission.
+The Ring 3 networking library builds bounded DNS A queries and sends them to the
+DHCP-provided resolver. Its response parser checks transaction ID, response and
+error flags, every label or compression pointer boundary, question and answer
+record bounds, class, type, and payload length. ARP warm-up retries and a finite
+descriptor-poll timeout keep resolution bounded. Boot CI exercises the parser
+with a synthetic compressed answer plus malformed pointer, truncation, and
+transaction-ID cases, so correctness does not depend on external network
+availability.
+Before parsing a live response, the resolver also requires source port 53 and
+an exact source-address match with the configured DNS server.
 
 Extended spawn requests carry a bounded descriptor-action array. The kernel
 validates every source and destination before task creation, then applies child
@@ -104,17 +202,39 @@ partition while retaining RAM-backed recovery when no supported disk exists.
 Mount state is explicit: after failed metadata validation, every diskfs
 operation fails closed. Only the private RAM conformance device may be formatted
 implicitly; an unknown VirtIO partition remains byte-for-byte unchanged.
+The block layer also has a deterministic, device-scoped write-failure hook for
+kernel conformance tests. Boot verifies that a failed cache writeback remains
+dirty, reports failure, and succeeds after fault injection is cleared.
 
 The partition layer accepts a narrow MBR subset after checking its signature,
-type, size, arithmetic, and device bounds. `SPLFS3` uses a versioned superblock,
-a fixed directory sector, and up to eight dynamically placed contiguous file
-extents. Files are bounded to 4 KiB. Sector counts are derived from file size;
-first-fit allocation treats the validated directory as the authoritative free
-space map. Mount rejects malformed names, duplicate entries, invalid sizes,
+type, size, arithmetic, and device bounds. `SPLFS4` uses a versioned superblock,
+a fixed directory sector, a one-sector allocation bitmap, and up to eight
+dynamically placed contiguous file extents. Files are bounded to 4 KiB. Sector
+counts are derived from file size; checked first-fit allocation consults the
+bitmap. Mount reconstructs the expected bitmap from the directory and rejects
+any disagreement. It also rejects malformed names, duplicate entries, invalid sizes,
 overlapping ranges, metadata-sector references, and out-of-partition extents.
-The superblock records an FNV-1a checksum of the complete directory sector.
-Metadata updates flush the directory before publishing and flushing its new
-checksum; mount rejects mismatches.
+The superblock records geometry, feature flags, clean/dirty transaction state,
+and FNV-1a checksums for both metadata sectors. Updates persist a dirty marker,
+then the bitmap and directory, then a clean superblock with new checksums. An
+I/O failure disables the mount. On reboot, a dirty filesystem is recoverable
+read-only only when the recorded directory checksum still matches and the
+directory passes full structural validation. The kernel reconstructs its bitmap
+in memory and rejects all writes, flushes, unlinks, and renames. A changed or
+invalid directory still causes mount rejection. QEMU fixtures separately model
+an unchanged dirty directory, bitmap-only drift, and directory drift; only the
+states retaining the authoritative old directory recover read-only.
+Clean unmount flushes writable media before making the mount inaccessible. Boot
+conformance proves reads fail while offline, remounts the same partition, and
+verifies the committed multi-sector payload; read-only recovery mounts detach
+without issuing writes.
+The RAM conformance path also formats a 66-sector geometry, fills seven 4 KiB
+extents while one directory slot remains free, proves the eighth allocation
+fails for lack of sectors, then unlinks one extent and reuses the capacity.
+Mount rejects geometry beyond the bitmap's explicit 4,096-sector coverage.
+The RAM-backed conformance path injects failures at successive block-write
+boundaries until it observes a partial commit, proves remount rejects that
+state, then reformats and verifies a clean mount before boot continues.
 Host-generated corruption fixtures exercise overlap and bounds rejection in a
 real VirtIO boot. Tests hash each rejected image before and after QEMU to prove
 that failed probing and later Ring 3 activity cannot modify it.
@@ -143,12 +263,28 @@ programs link neither kernel objects nor host libraries.
 The ELF loader constructs a bounded `argc`/`argv` stack. A spawned process gets
 a fresh address space and records its parent. `wait` blocks the parent in the
 scheduler; exit preserves zombie status long enough for collection and wakes a
-matching waiter.
+matching waiter. Parent exit reparents live children to the kernel and makes
+already-zombie children immediately reclaimable instead of leaking task slots.
+Passing process ID zero to `wait` collects any child and returns that child's
+actual ID, whether it was already a zombie or exits after the parent blocks.
 
 Each user process starts with a break at `0x80000000`. The `brk` syscall can
 grow it toward `0x90000000` with zeroed user-writable pages. The current
-userspace allocator is a monotonic bump allocator; shrinking and `free` are not
-implemented.
+userspace allocator stores checked in-band block headers, reuses first-fit free
+blocks, splits oversized blocks, and coalesces adjacent free blocks. A free tail
+block shrinks the process break; the kernel unmaps and returns every complete
+page above the new break while retaining any partial final page.
+The same runtime provides overflow-checked zero allocation and resize. Realloc
+grows into an adjacent free block when possible or preserves the old bytes in a
+new allocation; invalid allocator pointers are rejected.
+
+## Diagnostics
+
+Every character sent through the serial diagnostic path is retained in a
+4 KiB overwrite-on-full ring. Readers receive the newest bounded snapshot in
+chronological order. Boot performs a readback conformance check; a controlled
+userspace syscall returns at most 512 recent bytes through a checked writable
+buffer and never exposes the ring or kernel pointers.
 
 ## Boot modes
 
@@ -160,12 +296,13 @@ trusted kernel console.
 
 - No environment or independent background process reaper
 - No descriptor polling, signals, environment, or job control
-- No heap shrinking, `free`, or shared memory
+- No shared memory or mapped-file support
 - VirtIO requests poll synchronously; interrupts and concurrent requests are absent
 - Only legacy/transitional VirtIO PCI is supported, not modern VirtIO capabilities
-- `SPLFS3` is flat, limited to eight entries and one contiguous extent per file
+- `SPLFS4` is flat, limited to eight entries, one contiguous extent per file,
+  and a bitmap covering at most 4,096 sectors
 - GUI and most services remain in Ring 0; the kernel shell is recovery-only
-- No TCP, DNS, or userspace sockets
+- No TCP, TLS, HTTP, or general-purpose socket compatibility layer
 - No SMP or 64-bit support
 
 The next architecture change is safer and more capable diskfs metadata. See

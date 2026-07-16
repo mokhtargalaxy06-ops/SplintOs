@@ -23,10 +23,13 @@ int main(int argument_count, char **arguments)
         sys_close(descriptor) != 0) return 2;
     for (size_t i = 0; i < TEST_SIZE; ++i) if (read_back[i] != written[i]) return 3;
     static const char temporary[] = "/disk/remove.txt";
-    descriptor = sys_open(temporary, 2 | 4 | 16);
+    descriptor = sys_open(temporary, 1 | 2 | 4 | 16);
     if (descriptor < 0 || sys_write(descriptor, "remove", 6) != 6 ||
+        sys_truncate(descriptor, 600) != 0 || sys_seek(descriptor, 6) != 0 ||
+        sys_read(descriptor, read_back, 594) != 594 ||
         sys_close(descriptor) != 0 || sys_unlink(temporary) != 0 ||
         sys_open(temporary, 1) >= 0) return 4;
+    for (size_t i = 0; i < 594; ++i) if (read_back[i] != 0) return 4;
     descriptor = sys_open(temporary, 2 | 4);
     if (descriptor < 0 || sys_write(descriptor, "reused", 6) != 6 ||
         sys_close(descriptor) != 0) return 5;

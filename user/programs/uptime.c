@@ -3,6 +3,9 @@
 int main(int argument_count, char **arguments)
 {
     (void)argument_count; (void)arguments;
+    struct splint_uname identity;
+    if (sys_uname(&identity) != 0 || identity.system[0] != 'S' ||
+        identity.machine[0] != 'i') return 1;
     unsigned int value = sys_uptime();
     char digits[10]; size_t count = 0;
     do { digits[count++] = (char)('0' + value % 10); value /= 10; } while (value);

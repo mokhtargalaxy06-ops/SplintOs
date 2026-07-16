@@ -6,6 +6,7 @@
 #include "scheduler.h"
 #include "filesystem.h"
 #include "elf.h"
+#include "network.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -27,9 +28,27 @@ enum {
     SYSCALL_UPTIME = 14,
     SYSCALL_PROCESS_INFO = 15,
     SYSCALL_BRK = 16,
+    SYSCALL_YIELD = 17,
+    SYSCALL_SLEEP = 18,
+    SYSCALL_SEEK = 19,
     SYSCALL_FSYNC = 20,
     SYSCALL_UNLINK = 21,
     SYSCALL_RENAME = 22,
+    SYSCALL_LOG_READ = 23,
+    SYSCALL_STAT = 24,
+    SYSCALL_UNAME = 25,
+    SYSCALL_TRUNCATE = 26,
+    SYSCALL_MKDIR = 27,
+    SYSCALL_RMDIR = 28,
+    SYSCALL_CHMOD = 29,
+    SYSCALL_GETUID = 30,
+    SYSCALL_POLL = 31,
+    SYSCALL_CLOCK_GET = 32,
+    SYSCALL_UDP_OPEN = 33,
+    SYSCALL_UDP_SEND = 34,
+    SYSCALL_UDP_RECEIVE = 35,
+    SYSCALL_NETWORK_CONFIG = 36,
+    SYSCALL_WALL_CLOCK = 37,
     SYSCALL_MAX_WRITE = 4096,
     SYSCALL_MAX_PATH = 127,
     SYSCALL_MAX_ARGUMENTS = 8,
@@ -38,6 +57,12 @@ enum {
 
 struct syscall_memory_info { uint32_t total_kib, free_kib; };
 struct syscall_process_info { uint32_t process_count, current_pid; };
+struct syscall_uname { char system[16], release[16], machine[16]; };
+struct syscall_poll_entry { int descriptor; uint32_t events, returned_events; };
+struct syscall_clock { uint32_t ticks, ticks_per_second; };
+struct syscall_udp_endpoint { uint8_t address[4]; uint16_t port, reserved; };
+struct syscall_network_config { uint8_t address[4], subnet[4], gateway[4], dns[4]; };
+struct syscall_wall_clock { uint16_t year; uint8_t month, day, hour, minute, second; };
 
 struct user_spawn_request {
     uintptr_t path;
@@ -314,6 +339,14 @@ struct interrupt_frame *syscall_dispatch(struct interrupt_frame *frame)
         frame->eax = (uint32_t)task_user_brk(frame->ebx);
         return frame;
     }
+    if (frame->eax == SYSCALL_YIELD)
+        return scheduler_user_yield(frame);
+    if (frame->eax == SYSCALL_SLEEP)
+        return scheduler_user_sleep(frame, frame->ebx);
+    if (frame->eax == SYSCALL_SEEK) {
+        frame->eax = (uint32_t)task_descriptor_seek((int)frame->ebx, frame->ecx);
+        return frame;
+    }
     if (frame->eax == SYSCALL_FSYNC) {
         frame->eax = (uint32_t)task_descriptor_fsync((int)frame->ebx);
         return frame;
@@ -335,6 +368,170 @@ struct interrupt_frame *syscall_dispatch(struct interrupt_frame *frame)
             return frame;
         }
         frame->eax = (uint32_t)task_rename(old_path, new_path);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_LOG_READ) {
+        size_t capacity = frame->ecx;
+        if (capacity > 512 || capacity == 0 ||
+            !user_range_valid(task_current_address_space(), frame->ebx,
+                              capacity, true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        char snapshot[512];
+        size_t count = boot_log_read(snapshot, capacity);
+        char *user_buffer = (char *)(uintptr_t)frame->ebx;
+        for (size_t i = 0; i < count; ++i) user_buffer[i] = snapshot[i];
+        frame->eax = count;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_STAT) {
+        char path[SYSCALL_MAX_PATH + 1];
+        if (!copy_user_string(path, sizeof(path), frame->ebx) ||
+            !user_range_valid(task_current_address_space(), frame->ecx,
+                              sizeof(struct vfs_directory_entry), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct vfs_directory_entry entry;
+        int result = vfs_stat(path, &entry);
+        if (result == 0)
+            *(struct vfs_directory_entry *)(uintptr_t)frame->ecx = entry;
+        frame->eax = (uint32_t)result;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_UNAME) {
+        if (!user_range_valid(task_current_address_space(), frame->ebx,
+                              sizeof(struct syscall_uname), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        static const struct syscall_uname identity = {
+            "SplintOS", "0.4-educational", "i686"
+        };
+        *(struct syscall_uname *)(uintptr_t)frame->ebx = identity;
+        frame->eax = 0;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_TRUNCATE) {
+        frame->eax = (uint32_t)task_descriptor_truncate((int)frame->ebx, frame->ecx);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_MKDIR || frame->eax == SYSCALL_RMDIR) {
+        char path[SYSCALL_MAX_PATH + 1];
+        if (!copy_user_string(path, sizeof(path), frame->ebx)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        frame->eax = frame->eax == SYSCALL_MKDIR
+            ? (uint32_t)task_mkdir(path) : (uint32_t)task_rmdir(path);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_CHMOD) {
+        char path[SYSCALL_MAX_PATH + 1];
+        if (frame->ecx > 0777U || !copy_user_string(path, sizeof(path), frame->ebx)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        frame->eax = (uint32_t)task_chmod(path, (uint16_t)frame->ecx);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_GETUID) {
+        frame->eax = task_current_uid();
+        return frame;
+    }
+    if (frame->eax == SYSCALL_POLL) {
+        size_t count = frame->ecx;
+        if (count > 8 || frame->edx > 0x7FFFFFFFU ||
+            (count != 0 && !user_range_valid(task_current_address_space(), frame->ebx,
+                count * sizeof(struct syscall_poll_entry), true))) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct syscall_poll_entry *entries =
+            (struct syscall_poll_entry *)(uintptr_t)frame->ebx;
+        for (size_t i = 0; i < count; ++i) {
+            if ((entries[i].events & ~3U) != 0) {
+                frame->eax = (uint32_t)-1; return frame;
+            }
+            entries[i].returned_events = 0;
+        }
+        return scheduler_poll(frame, frame->ebx, count, frame->edx);
+    }
+    if (frame->eax == SYSCALL_CLOCK_GET) {
+        if (!user_range_valid(task_current_address_space(), frame->ebx,
+                              sizeof(struct syscall_clock), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct syscall_clock *clock = (struct syscall_clock *)(uintptr_t)frame->ebx;
+        clock->ticks = timer_ticks();
+        clock->ticks_per_second = 100;
+        frame->eax = 0;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_UDP_OPEN) {
+        if (frame->ebx > 65535U) frame->eax = (uint32_t)-1;
+        else frame->eax = (uint32_t)task_udp_open((uint16_t)frame->ebx);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_UDP_SEND) {
+        size_t length = frame->esi;
+        if (length > 512 ||
+            !user_range_valid(task_current_address_space(), frame->ecx,
+                              sizeof(struct syscall_udp_endpoint), false) ||
+            (length != 0 && !user_range_valid(task_current_address_space(), frame->edx,
+                                               length, false))) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct syscall_udp_endpoint endpoint =
+            *(const struct syscall_udp_endpoint *)(uintptr_t)frame->ecx;
+        uint8_t payload[512];
+        const uint8_t *source = (const uint8_t *)(uintptr_t)frame->edx;
+        for (size_t i = 0; i < length; ++i) payload[i] = source[i];
+        frame->eax = (uint32_t)task_udp_send((int)frame->ebx, endpoint.address,
+                                             endpoint.port, payload, length);
+        return frame;
+    }
+    if (frame->eax == SYSCALL_UDP_RECEIVE) {
+        size_t capacity = frame->esi;
+        if (capacity > 512 ||
+            !user_range_valid(task_current_address_space(), frame->ecx,
+                              sizeof(struct syscall_udp_endpoint), true) ||
+            (capacity != 0 && !user_range_valid(task_current_address_space(), frame->edx,
+                                                 capacity, true))) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        uint8_t payload[512], address[4]; uint16_t port;
+        int count = task_udp_receive((int)frame->ebx, payload, capacity, address, &port);
+        if (count >= 0) {
+            struct syscall_udp_endpoint *endpoint =
+                (struct syscall_udp_endpoint *)(uintptr_t)frame->ecx;
+            for (size_t i = 0; i < 4; ++i) endpoint->address[i] = address[i];
+            endpoint->port = port; endpoint->reserved = 0;
+            uint8_t *destination = (uint8_t *)(uintptr_t)frame->edx;
+            for (int i = 0; i < count; ++i) destination[i] = payload[i];
+        }
+        frame->eax = (uint32_t)count;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_NETWORK_CONFIG) {
+        if (!user_range_valid(task_current_address_space(), frame->ebx,
+                              sizeof(struct syscall_network_config), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct syscall_network_config *configuration =
+            (struct syscall_network_config *)(uintptr_t)frame->ebx;
+        network_configuration(configuration->address, configuration->subnet,
+                              configuration->gateway, configuration->dns);
+        frame->eax = 0;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_WALL_CLOCK) {
+        if (!user_range_valid(task_current_address_space(), frame->ebx,
+                              sizeof(struct syscall_wall_clock), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct wall_clock clock;
+        if (!devices_wall_clock(&clock)) { frame->eax = (uint32_t)-1; return frame; }
+        struct syscall_wall_clock *output =
+            (struct syscall_wall_clock *)(uintptr_t)frame->ebx;
+        output->year = clock.year; output->month = clock.month; output->day = clock.day;
+        output->hour = clock.hour; output->minute = clock.minute; output->second = clock.second;
+        frame->eax = 0;
         return frame;
     }
     frame->eax = (uint32_t)-1;

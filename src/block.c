@@ -27,6 +27,8 @@ static size_t device_count;
 static uint8_t ram_storage[RAM_SECTOR_SIZE * RAM_SECTOR_COUNT];
 static struct cache_entry cache[CACHE_ENTRY_COUNT];
 static uint32_t cache_age;
+static struct block_device *write_failure_device;
+static size_t writes_before_failure;
 
 static bool request_valid(const struct block_device *device, uint64_t sector,
                           size_t count)
@@ -57,7 +59,23 @@ int block_write(struct block_device *device, uint64_t sector,
 {
     if (buffer == NULL || !request_valid(device, sector, count) ||
         device->read_only || device->operations->write == NULL) return -1;
+    if (device == write_failure_device) {
+        if (writes_before_failure == 0) return -1;
+        --writes_before_failure;
+    }
     return device->operations->write(device, sector, buffer, count);
+}
+
+void block_test_fail_writes_after(struct block_device *device, size_t successful_writes)
+{
+    write_failure_device = device;
+    writes_before_failure = successful_writes;
+}
+
+void block_test_clear_write_failure(void)
+{
+    write_failure_device = NULL;
+    writes_before_failure = 0;
 }
 
 int block_flush(struct block_device *device)
@@ -180,6 +198,7 @@ static struct block_device ram_device = {
 void block_init(void)
 {
     device_count = 0;
+    block_test_clear_write_failure();
     block_cache_init();
     if (block_register(&ram_device) != 0) {
         serial_write("SplintOS: block subsystem failed\r\n");
@@ -208,7 +227,20 @@ void block_init(void)
     if (block_cached_write(&ram_device, 0, write_buffer) != 0 ||
         block_cache_flush(&ram_device) != 0)
         serial_write("SplintOS: block cache conformance failed\r\n");
-    else
+    else {
         serial_write("SplintOS: generic block layer, cache and ramblk0 online\r\n");
+        write_buffer[0] = 0x5A;
+        if (block_cached_write(&ram_device, 1, write_buffer) != 0) {
+            serial_write("SplintOS: block fault test setup failed\r\n");
+        } else {
+            block_test_fail_writes_after(&ram_device, 0);
+            int injected_result = block_cache_flush(&ram_device);
+            block_test_clear_write_failure();
+            if (injected_result == 0 || block_cache_flush(&ram_device) != 0)
+                serial_write("SplintOS: block fault propagation failed\r\n");
+            else
+                serial_write("SplintOS: deterministic block write faults online\r\n");
+        }
+    }
     virtio_block_init();
 }

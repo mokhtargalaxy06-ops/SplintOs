@@ -24,8 +24,9 @@ spawn actions, redirection, pipelines, system-information commands, and a basic
 page-backed heap. Recovery boot is selectable from GRUB. Storage now has a
 generic block API, bounded write-back cache, checked MBR parser, compact disk
 filesystem, `/disk` VFS mount, Ring 3 conformance program, and a legacy VirtIO
-block driver. `SPLFS3` supports bounded 4 KiB files in validated dynamic
-extents with checksummed directory metadata. A two-boot QEMU test proves a 1,300-byte Ring 3 write, `fsync`, remount,
+block driver. `SPLFS4` supports bounded 4 KiB files in validated dynamic
+extents with a cross-checked allocation bitmap, checksummed metadata, and
+clean/dirty commit state. A two-boot QEMU test proves a 1,300-byte Ring 3 write, `fsync`, remount,
 and byte verification. Files now use checked first-fit dynamic extents derived
 from the authoritative directory. The active milestone is allocation failure
 coverage plus a scalable free-space structure. Automated VirtIO boots now cover
@@ -53,7 +54,22 @@ Before introducing user space, I need to make the existing foundation reliable.
 
 - Replace remaining polling fallbacks with interrupt-driven paths where safe.
 - Add kernel assertions, structured error codes, and consistent panic reports.
-- Record boot logs in a bounded in-memory ring buffer.
+- [x] Record boot logs in a bounded in-memory ring buffer.
+- [x] Expose bounded read-only boot-log snapshots through checked user copies.
+- [x] Reap zombie children whose parent exits before collecting them.
+- [x] Support blocking and immediate `wait(0)` collection of any child.
+- [x] Add bounded Ring 3 `yield` and wrap-safe timer-tick `sleep`.
+- [x] Expose bounded VFS seek with shared open-file offsets across `dup2`.
+- [x] Add checked path `stat` using the directory metadata ABI.
+- [x] Add fixed-layout `uname` system identity.
+- [x] Add descriptor truncation with offset clamping and zero-filled growth.
+- [x] Add checked Ring 3 empty-directory creation and removal.
+- [x] Expose ownership-checked `chmod` with a bounded permission mask.
+- [x] Expose read-only process user identity without change authority.
+- [x] Prove true sector exhaustion with a free directory slot and post-unlink reuse.
+- [x] Add blocking bounded descriptor polling with timer deadlines.
+- [x] Expose the monotonic tick clock and its explicit frequency.
+- [x] Add hostile syscall-boundary regression cases that must fail without a fault.
 - Audit interrupt locking, scheduler state, and shared device queues for races.
 - Add spinlocks and interrupt-safe locking rules for shared kernel structures.
 - Add timer deadlines and timeouts so hardware failures cannot hang forever.
@@ -157,8 +173,8 @@ commands should execute as separate user processes.
 
 ## Phase 4: Add persistent block storage
 
-The current RAM filesystem loses all data at shutdown. Persistent storage is
-required before the OS can be useful for daily tasks.
+The RAM root filesystem remains temporary, while the completed VirtIO-backed
+`/disk` path provides bounded persistent files under QEMU.
 
 ### Recommended first path
 
@@ -174,10 +190,10 @@ same time.
 - [x] Implement a bounded legacy VirtIO request queue, status handling, and timeout.
 - [x] Add a block cache with explicit dirty-sector writeback.
 - [x] Parse a checked MBR subset.
-- [x] Implement the documented teaching filesystem, now versioned as `SPLFS3`.
+- [x] Implement the documented teaching filesystem, now versioned as `SPLFS4`.
 - [x] Mount it at `/disk` and keep RAMFS as root and for temporary files.
 - [x] Add descriptor-level `fsync` with error propagation.
-- [x] Reject malformed `SPLFS3` directory metadata during mount.
+- [x] Reject malformed `SPLFS4` directory metadata during mount.
 - [x] Checksum directory metadata and test one-byte corruption rejection.
 - [x] Verify a persistent QEMU image across two independent boots.
 - [x] Add versioned multi-sector files and eliminate large kernel-stack buffers.
@@ -188,8 +204,18 @@ same time.
 - [x] Add dynamic contiguous extents with overlap validation and reclamation.
 - [x] Add hashed QEMU corruption tests for overlap and partition-bound failures.
 - [x] Verify directory exhaustion returns an error and reclaimed entries are reusable.
-- Add filesystem timestamps, rename, unlink, truncation, and free-space checks.
-- Add `fsync`, clean unmount, and read-only recovery after corruption.
+- [x] Add a bounded free-sector bitmap and cross-check it against every extent.
+- [x] Reject dirty/interrupted metadata state and bitmap corruption non-destructively.
+- [x] Add deterministic block-write failure injection and cache propagation coverage.
+- [x] Prove an injected partial `SPLFS4` metadata commit is rejected on remount.
+- [x] Mount a dirty but unchanged checksummed directory read-only without writes.
+- [x] Distinguish recoverable dirty bitmap drift from rejected directory drift.
+- [x] Add userspace `free`, first-fit reuse, splitting, and adjacent-block coalescing.
+- [x] Support shrinking `brk` and return complete tail pages to physical memory.
+- [x] Add overflow-checked `calloc` and data-preserving `realloc`.
+- Add filesystem timestamps through a versioned `SPLFS5` layout and explicit
+  migration; rename, unlink, truncation, and full-space checks are complete.
+- [x] Add clean unmount; `fsync` and read-only dirty recovery are complete.
 
 ### Safety tests
 
@@ -233,12 +259,14 @@ step is a reliable socket interface and the protocols applications need.
 
 ### Work
 
-- Expose UDP through file-descriptor-based sockets.
-- Add routing, subnet, gateway, and interface configuration tables.
-- Implement DNS resolution with bounded parsing and timeouts.
+- [x] Expose UDP through capability-checked file-descriptor-based sockets.
+- [x] Add single-interface subnet, gateway, DNS, and next-hop routing state.
+- [x] Implement userspace IPv4 DNS resolution with bounded parsing and timeouts.
 - Implement TCP state handling, retransmission, congestion basics, and cleanup.
-- Add loopback networking for local tests.
-- Support multiple simultaneous sockets and blocking/non-blocking operation.
+- [x] Add deterministic IPv4 loopback networking for local UDP tests.
+- [x] Replace the overwrite-prone UDP slot with a four-datagram FIFO.
+- [x] Support multiple simultaneous UDP sockets and poll-based blocking or
+  non-blocking operation.
 - Move DHCP and DNS policy into user-space services when practical.
 - Add TLS through a carefully selected, portable library only after the random
   number generator and timekeeping are trustworthy.
@@ -258,8 +286,9 @@ primitives than a boot-time TSC seed.
 ### Work
 
 - Read ACPI power-management and timer information more completely.
-- Add monotonic and real-time clocks with a user-settable wall clock.
-- Support RTC access and persistent time where hardware permits it.
+- Add a user-settable wall clock; monotonic time and read-only RTC snapshots are
+  available.
+- [x] Support validated CMOS RTC access where hardware permits it.
 - Collect entropy from timing and supported hardware sources.
 - Build a cryptographically secure random generator with explicit readiness.
 - Add non-executable mappings, guard pages, and randomized user layouts where
@@ -422,9 +451,9 @@ Kernel stabilization
 -> Broader hardware support
 ```
 
-I should resist starting TCP, USB, audio, or a large desktop before protected
-user space and persistent storage work. Those two milestones determine the
-architecture of nearly everything that follows.
+Protected user space and persistent storage are now established. TCP should
+remain incremental, and USB, audio, or a large desktop should wait until their
+supporting interfaces and tests are designed.
 
 ## Definition of a useful SplintOS 1.0
 

@@ -157,6 +157,9 @@ $(USER_BUILD)/ps.o: user/programs/ps.c user/include/splint/syscall.h | $(USER_BU
 $(USER_BUILD)/heap.o: user/libc/heap.c user/include/splint/stdlib.h user/include/splint/syscall.h | $(USER_BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
+$(USER_BUILD)/dns.o: user/libc/dns.c user/include/splint/net.h user/include/splint/syscall.h | $(USER_BUILD)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
 $(USER_BUILD)/heaptest.o: user/programs/heaptest.c user/include/splint/stdlib.h user/include/splint/syscall.h | $(USER_BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
@@ -175,7 +178,7 @@ $(USER_RUNNER): $(USER_BUILD)/crt0.o $(USER_BUILD)/syscall.o $(USER_BUILD)/runne
 $(USER_SHELL): $(USER_BUILD)/crt0.o $(USER_BUILD)/syscall.o $(USER_BUILD)/sh.o user/linker.ld
 	$(LD) -m elf_i386 -T user/linker.ld -nostdlib -o $@ $(filter %.o,$^)
 
-$(USER_FDTEST): $(USER_BUILD)/crt0.o $(USER_BUILD)/syscall.o $(USER_BUILD)/fdtest.o user/linker.ld
+$(USER_FDTEST): $(USER_BUILD)/crt0.o $(USER_BUILD)/syscall.o $(USER_BUILD)/dns.o $(USER_BUILD)/fdtest.o user/linker.ld
 	$(LD) -m elf_i386 -T user/linker.ld -nostdlib -o $@ $(filter %.o,$^)
 
 $(USER_ECHO): $(USER_BUILD)/crt0.o $(USER_BUILD)/syscall.o $(USER_BUILD)/echo.o user/linker.ld

@@ -256,6 +256,32 @@ bool address_space_map_user(uint32_t *directory, uintptr_t virtual_address,
     return true;
 }
 
+bool address_space_unmap_user(uint32_t *directory, uintptr_t virtual_address)
+{
+    if (directory == NULL || (virtual_address & (PAGE_SIZE - 1)) != 0 ||
+        virtual_address < 0x40000000U || virtual_address >= 0xC0000000U)
+        return false;
+    uint32_t directory_index = (uint32_t)(virtual_address >> 22);
+    uint32_t pde = directory[directory_index];
+    if ((pde & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER) ||
+        (pde & PAGE_LARGE) != 0) return false;
+    uint32_t *table = (uint32_t *)(uintptr_t)(pde & ~0xFFFU);
+    uint32_t table_index = (uint32_t)((virtual_address >> 12) & 0x3FFU);
+    uint32_t pte = table[table_index];
+    if ((pte & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER)) return false;
+    table[table_index] = 0;
+    __asm__ volatile ("invlpg (%0)" : : "r"(virtual_address) : "memory");
+    physical_page_free((void *)(uintptr_t)(pte & ~0xFFFU));
+    bool empty = true;
+    for (size_t i = 0; i < 1024; ++i)
+        if ((table[i] & PAGE_PRESENT) != 0) { empty = false; break; }
+    if (empty) {
+        directory[directory_index] = 0;
+        physical_page_free(table);
+    }
+    return true;
+}
+
 bool user_range_valid(uint32_t *directory, uintptr_t address, size_t length,
                       bool writable)
 {

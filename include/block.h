@@ -38,5 +38,7 @@ int block_cached_read(struct block_device *device, uint64_t sector, void *buffer
 int block_cached_write(struct block_device *device, uint64_t sector,
                        const void *buffer);
 int block_cache_flush(struct block_device *device);
+void block_test_fail_writes_after(struct block_device *device, size_t successful_writes);
+void block_test_clear_write_failure(void);
 
 #endif

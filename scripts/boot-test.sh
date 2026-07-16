@@ -25,10 +25,14 @@ fi
 
 for message in \
     'physical allocator, paging and heap online' \
+    'bounded boot log online' \
     'PCI and ACPI discovery complete' \
     'generic block layer, cache and ramblk0 online' \
+    'deterministic block write faults online' \
     'validated MBR partition discovered' \
     'diskfs format, flush and remount online' \
+    'diskfs interrupted commit rejection online' \
+    'diskfs full-disk reclamation online' \
     'preemptive scheduler online' \
     'application runtime online' \
     'GDT, TSS, IDT, PIC and PIT initialized' \
@@ -52,7 +56,7 @@ for message in \
     'memory: total=' \
     'uptime: ' \
     'processes: active=' \
-    'heap: userspace brk allocator online' \
+    'heap: allocation reuse and coalescing online' \
     'disk: multi-sector VFS persistence online' \
     'user> ' \
     'ELF user process exited status=0'; do
@@ -63,7 +67,7 @@ for message in \
     }
 done
 
-if [ "$(grep -c 'ELF user process exited status=0' "$log")" -ne 16 ]; then
+if [ "$(grep -c 'ELF user process exited status=0' "$log")" -ne 23 ]; then
     echo "the finite ELF user processes did not exit successfully" >&2
     sed -n '1,160p' "$log" >&2
     exit 1
