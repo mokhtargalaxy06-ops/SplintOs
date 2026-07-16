@@ -1,6 +1,7 @@
 #include "filesystem.h"
 
 #include "devices.h"
+#include "diskfs.h"
 #include "memory.h"
 #include "scheduler.h"
 #include "security.h"
@@ -29,6 +30,8 @@ struct vfs_node {
     size_t capacity;
     uint16_t mode;
     uint32_t owner;
+    bool disk_backed;
+    bool disk_mount;
 };
 
 struct file_descriptor {
@@ -40,6 +43,29 @@ struct file_descriptor {
 
 static struct vfs_node nodes[MAX_NODES];
 static struct file_descriptor descriptors[MAX_DESCRIPTORS];
+
+extern const uint8_t _binary_build_user_hello_elf_start[];
+extern const uint8_t _binary_build_user_hello_elf_end[];
+extern const uint8_t _binary_build_user_cat_elf_start[];
+extern const uint8_t _binary_build_user_cat_elf_end[];
+extern const uint8_t _binary_build_user_runner_elf_start[];
+extern const uint8_t _binary_build_user_runner_elf_end[];
+extern const uint8_t _binary_build_user_sh_elf_start[];
+extern const uint8_t _binary_build_user_sh_elf_end[];
+extern const uint8_t _binary_build_user_fdtest_elf_start[];
+extern const uint8_t _binary_build_user_fdtest_elf_end[];
+extern const uint8_t _binary_build_user_echo_elf_start[];
+extern const uint8_t _binary_build_user_echo_elf_end[];
+extern const uint8_t _binary_build_user_pipetest_elf_start[];
+extern const uint8_t _binary_build_user_pipetest_elf_end[];
+extern const uint8_t _binary_build_user_wc_elf_start[];
+extern const uint8_t _binary_build_user_wc_elf_end[];
+extern const uint8_t _binary_build_user_ls_elf_start[], _binary_build_user_ls_elf_end[];
+extern const uint8_t _binary_build_user_mem_elf_start[], _binary_build_user_mem_elf_end[];
+extern const uint8_t _binary_build_user_uptime_elf_start[], _binary_build_user_uptime_elf_end[];
+extern const uint8_t _binary_build_user_ps_elf_start[], _binary_build_user_ps_elf_end[];
+extern const uint8_t _binary_build_user_heaptest_elf_start[], _binary_build_user_heaptest_elf_end[];
+extern const uint8_t _binary_build_user_disk_elf_start[], _binary_build_user_disk_elf_end[];
 
 static size_t string_length(const char *text)
 {
@@ -139,6 +165,15 @@ static int node_create(const char *path, enum vfs_node_type type)
         nodes[i].parent = parent;
         nodes[i].owner = task_current_uid();
         nodes[i].mode = type == VFS_DIRECTORY ? 0755 : 0644;
+        if (type == VFS_FILE && nodes[parent].disk_mount) {
+            nodes[i].disk_backed = true;
+            char disk_name[NAME_LENGTH];
+            name_copy(disk_name, name, length);
+            if (diskfs_write_file(disk_name, "", 0) != 0) {
+                nodes[i].used = false;
+                return -1;
+            }
+        }
         name_copy(nodes[i].name, name, length);
         return 0;
     }
@@ -161,7 +196,11 @@ int vfs_open(const char *path, uint32_t flags)
     if (nodes[node].type == VFS_DEVICE && task_current_uid() != 0 &&
         !security_has_capability(CAP_DEVICE_ACCESS)) return -1;
     if ((flags & VFS_TRUNCATE) != 0 && (flags & VFS_WRITE) != 0 &&
-        nodes[node].type == VFS_FILE) nodes[node].size = 0;
+        nodes[node].type == VFS_FILE) {
+        nodes[node].size = 0;
+        if (nodes[node].disk_backed && diskfs_write_file(nodes[node].name, "", 0) != 0)
+            return -1;
+    }
     for (int fd = 0; fd < MAX_DESCRIPTORS; ++fd) {
         if (descriptors[fd].used) continue;
         descriptors[fd].used = true;
@@ -189,7 +228,16 @@ int vfs_read(int fd, void *buffer, size_t count)
     if (node->type == VFS_DEVICE) return 0;
     if (file->offset >= node->size) return 0;
     if (count > node->size - file->offset) count = node->size - file->offset;
-    bytes_copy(buffer, node->data + file->offset, count);
+    if (node->disk_backed) {
+        uint8_t *contents = kmalloc(DISKFS_FILE_SIZE);
+        if (contents == NULL) return -1;
+        int size = diskfs_read_file(node->name, contents, DISKFS_FILE_SIZE);
+        if (size < 0 || (size_t)size != node->size) { kfree(contents); return -1; }
+        bytes_copy(buffer, contents + file->offset, count);
+        kfree(contents);
+    } else {
+        bytes_copy(buffer, node->data + file->offset, count);
+    }
     file->offset += count;
     return (int)count;
 }
@@ -226,8 +274,25 @@ int vfs_write(int fd, const void *buffer, size_t count)
         }
         return (int)count;
     }
-    if (!file_reserve(node, file->offset + count)) return -1;
-    bytes_copy(node->data + file->offset, buffer, count);
+    if (node->disk_backed) {
+        if (file->offset + count > DISKFS_FILE_SIZE) return -1;
+        uint8_t *contents = kmalloc(DISKFS_FILE_SIZE);
+        if (contents == NULL) return -1;
+        for (size_t i = 0; i < DISKFS_FILE_SIZE; ++i) contents[i] = 0;
+        if (node->size != 0) {
+            int size = diskfs_read_file(node->name, contents, DISKFS_FILE_SIZE);
+            if (size < 0 || (size_t)size != node->size) { kfree(contents); return -1; }
+        }
+        bytes_copy(contents + file->offset, buffer, count);
+        size_t new_size = file->offset + count > node->size ? file->offset + count : node->size;
+        if (diskfs_write_file(node->name, contents, new_size) != 0) {
+            kfree(contents); return -1;
+        }
+        kfree(contents);
+    } else {
+        if (!file_reserve(node, file->offset + count)) return -1;
+        bytes_copy(node->data + file->offset, buffer, count);
+    }
     file->offset += count;
     if (file->offset > node->size) node->size = file->offset;
     return (int)count;
@@ -238,6 +303,59 @@ int vfs_seek(int fd, size_t offset)
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
     if (offset > nodes[descriptors[fd].node].size) return -1;
     descriptors[fd].offset = offset;
+    return 0;
+}
+
+int vfs_fsync(int fd)
+{
+    if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
+    struct vfs_node *node = &nodes[descriptors[fd].node];
+    if (node->type != VFS_FILE) return -1;
+    return node->disk_backed ? diskfs_flush() : 0;
+}
+
+int vfs_unlink(const char *path)
+{
+    uint16_t node = path_resolve(path);
+    if (node == NO_NODE || nodes[node].type != VFS_FILE ||
+        !permitted(&nodes[node], 0200, 0002)) return -1;
+    for (int fd = 0; fd < MAX_DESCRIPTORS; ++fd)
+        if (descriptors[fd].used && descriptors[fd].node == node) return -1;
+    if (nodes[node].disk_backed && diskfs_unlink(nodes[node].name) != 0) return -1;
+    if (nodes[node].data != NULL) kfree(nodes[node].data);
+    nodes[node] = (struct vfs_node){0};
+    return 0;
+}
+
+int vfs_rename(const char *old_path, const char *new_path)
+{
+    uint16_t node = path_resolve(old_path);
+    uint16_t destination = path_resolve(new_path);
+    if (node == NO_NODE || node == 0 || node == destination ||
+        !permitted(&nodes[node], 0200, 0002)) return -1;
+    uint16_t new_parent;
+    const char *new_name;
+    size_t new_length;
+    if (!split_parent(new_path, &new_parent, &new_name, &new_length) ||
+        new_parent != nodes[node].parent ||
+        !permitted(&nodes[new_parent], 0200, 0002)) return -1;
+    if (destination != NO_NODE) {
+        if (nodes[destination].type != VFS_FILE ||
+            nodes[destination].parent != new_parent ||
+            nodes[destination].disk_backed != nodes[node].disk_backed) return -1;
+        for (int fd = 0; fd < MAX_DESCRIPTORS; ++fd)
+            if (descriptors[fd].used && descriptors[fd].node == destination) return -1;
+    }
+    if (nodes[node].disk_backed) {
+        char replacement[NAME_LENGTH];
+        name_copy(replacement, new_name, new_length);
+        if (diskfs_rename(nodes[node].name, replacement) != 0) return -1;
+    }
+    if (destination != NO_NODE) {
+        if (nodes[destination].data != NULL) kfree(nodes[destination].data);
+        nodes[destination] = (struct vfs_node){0};
+    }
+    name_copy(nodes[node].name, new_name, new_length);
     return 0;
 }
 
@@ -279,6 +397,15 @@ static void initial_file(const char *path, const char *contents)
     }
 }
 
+static void initial_binary(const char *path, const void *data, size_t size)
+{
+    int fd = vfs_open(path, VFS_WRITE | VFS_CREATE);
+    if (fd >= 0) {
+        (void)vfs_write(fd, data, size);
+        (void)vfs_close(fd);
+    }
+}
+
 void filesystem_init(void)
 {
     nodes[0].used = true;
@@ -290,6 +417,27 @@ void filesystem_init(void)
     (void)vfs_mkdir("/dev");
     (void)vfs_mkdir("/etc");
     (void)vfs_mkdir("/tmp");
+    (void)vfs_mkdir("/bin");
+    (void)vfs_mkdir("/disk");
+    uint16_t disk_node = path_resolve("/disk");
+    if (disk_node != NO_NODE) {
+        struct diskfs_entry entries[12];
+        int count = diskfs_list(entries, 12);
+        for (int i = 0; i < count; ++i) {
+            char path[NAME_LENGTH + 7] = "/disk/";
+            size_t j = 0;
+            while (entries[i].name[j] != '\0') { path[6 + j] = entries[i].name[j]; ++j; }
+            path[6 + j] = '\0';
+            if (node_create(path, VFS_FILE) == 0) {
+                uint16_t child = path_resolve(path);
+                if (child != NO_NODE) {
+                    nodes[child].disk_backed = true;
+                    nodes[child].size = entries[i].size;
+                }
+            }
+        }
+        nodes[disk_node].disk_mount = true;
+    }
     (void)vfs_chmod("/tmp", 0777);
     (void)node_create("/dev/null", VFS_DEVICE);
     uint16_t null_node = path_resolve("/dev/null");
@@ -299,5 +447,41 @@ void filesystem_init(void)
     if (serial_node != NO_NODE) nodes[serial_node].device = DEVICE_SERIAL;
     initial_file("/etc/motd", "Welcome to SplintOS - created in Morocco.\n");
     initial_file("/README", "SplintOS in-memory filesystem is online.\n");
+    initial_binary("/bin/hello", _binary_build_user_hello_elf_start,
+                   (size_t)(_binary_build_user_hello_elf_end -
+                            _binary_build_user_hello_elf_start));
+    initial_binary("/bin/cat", _binary_build_user_cat_elf_start,
+                   (size_t)(_binary_build_user_cat_elf_end -
+                            _binary_build_user_cat_elf_start));
+    initial_binary("/bin/runner", _binary_build_user_runner_elf_start,
+                   (size_t)(_binary_build_user_runner_elf_end -
+                            _binary_build_user_runner_elf_start));
+    initial_binary("/bin/sh", _binary_build_user_sh_elf_start,
+                   (size_t)(_binary_build_user_sh_elf_end -
+                            _binary_build_user_sh_elf_start));
+    initial_binary("/bin/fdtest", _binary_build_user_fdtest_elf_start,
+                   (size_t)(_binary_build_user_fdtest_elf_end -
+                            _binary_build_user_fdtest_elf_start));
+    initial_binary("/bin/echo", _binary_build_user_echo_elf_start,
+                   (size_t)(_binary_build_user_echo_elf_end -
+                            _binary_build_user_echo_elf_start));
+    initial_binary("/bin/pipetest", _binary_build_user_pipetest_elf_start,
+                   (size_t)(_binary_build_user_pipetest_elf_end -
+                            _binary_build_user_pipetest_elf_start));
+    initial_binary("/bin/wc", _binary_build_user_wc_elf_start,
+                   (size_t)(_binary_build_user_wc_elf_end -
+                            _binary_build_user_wc_elf_start));
+    initial_binary("/bin/ls", _binary_build_user_ls_elf_start,
+                   (size_t)(_binary_build_user_ls_elf_end - _binary_build_user_ls_elf_start));
+    initial_binary("/bin/mem", _binary_build_user_mem_elf_start,
+                   (size_t)(_binary_build_user_mem_elf_end - _binary_build_user_mem_elf_start));
+    initial_binary("/bin/uptime", _binary_build_user_uptime_elf_start,
+                   (size_t)(_binary_build_user_uptime_elf_end - _binary_build_user_uptime_elf_start));
+    initial_binary("/bin/ps", _binary_build_user_ps_elf_start,
+                   (size_t)(_binary_build_user_ps_elf_end - _binary_build_user_ps_elf_start));
+    initial_binary("/bin/heaptest", _binary_build_user_heaptest_elf_start,
+                   (size_t)(_binary_build_user_heaptest_elf_end - _binary_build_user_heaptest_elf_start));
+    initial_binary("/bin/disk", _binary_build_user_disk_elf_start,
+                   (size_t)(_binary_build_user_disk_elf_end - _binary_build_user_disk_elf_start));
     serial_write("SplintOS: writable RAM filesystem mounted at /\r\n");
 }

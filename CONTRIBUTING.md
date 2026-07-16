@@ -7,10 +7,11 @@ large architectural change so interfaces can be agreed before implementation.
 
 1. Build with `make clean test`.
 2. If QEMU, GRUB utilities, and xorriso are installed, run `make test-boot`.
-3. Keep hardware-specific code behind a small interface in `include/`.
-4. Treat all packet, firmware, filesystem, and user-provided lengths as
+3. For block, cache, partition, VFS, or diskfs changes, run `make test-storage`.
+4. Keep hardware-specific code behind a small interface in `include/`.
+5. Treat all packet, firmware, filesystem, and user-provided lengths as
    untrusted.
-5. Update `README.md` and `docs/hardware-support.md` when behavior changes.
+6. Update the owning document listed in `docs/README.md` when behavior changes.
 
 Warnings are errors. Contributions must not introduce unresolved symbols,
 hosted-library dependencies, silent privilege bypasses, or claims of hardware

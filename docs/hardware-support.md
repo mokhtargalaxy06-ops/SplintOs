@@ -9,7 +9,7 @@
 | Bus discovery | PCI configuration mechanism 1 | Up to 64 recorded functions |
 | Firmware | ACPI RSDP/RSDT discovery | Table interpretation incomplete |
 | Ethernet | Realtek RTL8139 | ARP, IPv4, ICMP, UDP, DHCP |
-| Storage | RAM filesystem | No persistent block driver yet |
+| Storage | Legacy VirtIO block and `ramblk0` | QEMU persistence; polling queue, 512-byte sectors |
 
 USB, PCIe ECAM, AHCI, NVMe, Wi-Fi, audio, Bluetooth, and accelerated GPUs are
 not supported. Add a tested driver before changing this table.

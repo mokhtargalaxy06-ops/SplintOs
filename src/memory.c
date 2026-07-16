@@ -45,6 +45,13 @@ static struct heap_block *heap_head;
 static uint32_t total_pages;
 static uint32_t free_pages;
 
+enum {
+    PAGE_PRESENT = 1U,
+    PAGE_WRITABLE = 2U,
+    PAGE_USER = 4U,
+    PAGE_LARGE = 0x80U,
+};
+
 static void bytes_set(void *destination, uint8_t value, size_t length)
 {
     uint8_t *bytes = destination;
@@ -80,8 +87,9 @@ static void reserve_range(uintptr_t start, uintptr_t end)
 
 static void paging_enable(void)
 {
-    /* Identity-map 4 GiB with 4 MiB pages so framebuffer/MMIO remain usable. */
-    for (uint32_t i = 0; i < 1024; ++i) page_directory[i] = (i << 22) | 0x083U;
+    /* Kernel and device identity mappings are supervisor-only. */
+    for (uint32_t i = 0; i < 1024; ++i)
+        page_directory[i] = (i << 22) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_LARGE;
     uintptr_t directory = (uintptr_t)page_directory;
     __asm__ volatile (
         "mov %%cr4, %%eax\n"
@@ -205,3 +213,83 @@ void kfree(void *pointer)
 
 uint32_t memory_total_kib(void) { return total_pages * 4; }
 uint32_t memory_free_kib(void) { return free_pages * 4; }
+
+uint32_t *address_space_kernel(void) { return page_directory; }
+
+void address_space_activate(uint32_t *directory)
+{
+    if (directory == NULL) directory = page_directory;
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(directory) : "memory");
+}
+
+uint32_t *address_space_create(void)
+{
+    uint32_t *directory = physical_page_alloc();
+    if (directory == NULL) return NULL;
+    for (uint32_t i = 0; i < 1024; ++i) directory[i] = page_directory[i];
+    return directory;
+}
+
+bool address_space_map_user(uint32_t *directory, uintptr_t virtual_address,
+                            void *physical_page, bool writable)
+{
+    if (directory == NULL || physical_page == NULL ||
+        (virtual_address & (PAGE_SIZE - 1)) != 0 ||
+        virtual_address < 0x40000000U || virtual_address >= 0xC0000000U)
+        return false;
+    uint32_t directory_index = (uint32_t)(virtual_address >> 22);
+    uint32_t table_index = (uint32_t)((virtual_address >> 12) & 0x3FFU);
+    uint32_t *table;
+    if ((directory[directory_index] & PAGE_LARGE) != 0) {
+        table = physical_page_alloc();
+        if (table == NULL) return false;
+        bytes_set(table, 0, PAGE_SIZE);
+        directory[directory_index] = (uint32_t)(uintptr_t)table |
+            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    } else {
+        table = (uint32_t *)(uintptr_t)(directory[directory_index] & ~0xFFFU);
+        if (table == NULL) return false;
+    }
+    if ((table[table_index] & PAGE_PRESENT) != 0) return false;
+    table[table_index] = (uint32_t)(uintptr_t)physical_page | PAGE_PRESENT |
+        PAGE_USER | (writable ? PAGE_WRITABLE : 0U);
+    return true;
+}
+
+bool user_range_valid(uint32_t *directory, uintptr_t address, size_t length,
+                      bool writable)
+{
+    if (directory == NULL || length == 0 || address < 0x40000000U ||
+        address >= 0xC0000000U || length > 0xC0000000U - address)
+        return false;
+    uintptr_t end = address + length - 1;
+    uintptr_t last_page = end & ~(uintptr_t)(PAGE_SIZE - 1);
+    for (uintptr_t page = address & ~(uintptr_t)(PAGE_SIZE - 1);;) {
+        uint32_t pde = directory[page >> 22];
+        if ((pde & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER) ||
+            (pde & PAGE_LARGE) != 0) return false;
+        uint32_t *table = (uint32_t *)(uintptr_t)(pde & ~0xFFFU);
+        uint32_t pte = table[(page >> 12) & 0x3FFU];
+        if ((pte & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER) ||
+            (writable && (pte & PAGE_WRITABLE) == 0)) return false;
+        if (page == last_page) break;
+        page += PAGE_SIZE;
+    }
+    return true;
+}
+
+void address_space_destroy(uint32_t *directory)
+{
+    if (directory == NULL || directory == page_directory) return;
+    for (uint32_t i = 256; i < 768; ++i) {
+        uint32_t pde = directory[i];
+        if ((pde & PAGE_PRESENT) == 0 || (pde & PAGE_LARGE) != 0 ||
+            (pde & PAGE_USER) == 0) continue;
+        uint32_t *table = (uint32_t *)(uintptr_t)(pde & ~0xFFFU);
+        for (uint32_t j = 0; j < 1024; ++j)
+            if ((table[j] & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER))
+                physical_page_free((void *)(uintptr_t)(table[j] & ~0xFFFU));
+        physical_page_free(table);
+    }
+    physical_page_free(directory);
+}

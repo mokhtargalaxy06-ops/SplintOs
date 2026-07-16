@@ -230,9 +230,10 @@ static void shell_task(void *context)
     }
 }
 
-void applications_init(void)
+void applications_init(bool recovery_mode)
 {
-    if (task_create("shell", shell_task, NULL) < 0)
-        serial_write("SplintOS: failed to start command shell\r\n");
-    else serial_write("SplintOS: application runtime online\r\n");
+    if (recovery_mode && task_create("recovery-shell", shell_task, NULL) < 0)
+        serial_write("SplintOS: failed to start recovery shell\r\n");
+    serial_write(recovery_mode ? "SplintOS: recovery console selected\r\n"
+                               : "SplintOS: application runtime online\r\n");
 }

@@ -9,6 +9,10 @@
 #include "applications.h"
 #include "hardware.h"
 #include "security.h"
+#include "elf.h"
+#include "block.h"
+#include "partition.h"
+#include "diskfs.h"
 
 static void maintenance_task(void *context)
 {
@@ -29,6 +33,25 @@ static volatile uint16_t *const vga = (uint16_t *)0xB8000;
 static size_t row;
 static size_t column;
 static uint8_t color = 0x0F;
+
+struct __attribute__((packed)) multiboot_command_info {
+    uint32_t flags, mem_lower, mem_upper, boot_device, command_line;
+};
+
+static bool recovery_requested(uint32_t address)
+{
+    const struct multiboot_command_info *info =
+        (const struct multiboot_command_info *)(uintptr_t)address;
+    if ((info->flags & (1U << 2)) == 0 || info->command_line == 0) return false;
+    const char *text = (const char *)(uintptr_t)info->command_line;
+    static const char recovery[] = "recovery";
+    for (size_t i = 0; text[i] != '\0'; ++i) {
+        size_t j = 0;
+        while (recovery[j] != '\0' && text[i + j] == recovery[j]) ++j;
+        if (recovery[j] == '\0') return true;
+    }
+    return false;
+}
 
 static void terminal_clear(void)
 {
@@ -80,8 +103,12 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info)
     }
 
     devices_init();
+    bool recovery = recovery_requested(multiboot_info);
     bool memory_ready = memory_init(multiboot_info);
     hardware_init();
+    block_init();
+    partition_init();
+    diskfs_init();
     bool graphics = gui_init(multiboot_info);
     bool networking = network_init();
     if (memory_ready) {
@@ -89,7 +116,15 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info)
         security_init();
         filesystem_init();
         (void)task_create("maintenance", maintenance_task, NULL);
-        applications_init();
+        applications_init(recovery);
+        if (!recovery) {
+            if (elf_load_process("/bin/hello", "hello") < 0)
+                serial_write("SplintOS: failed to load /bin/hello\r\n");
+            else
+                serial_write("SplintOS: ELF loader online\r\n");
+            if (elf_load_process("/bin/sh", "shell") < 0)
+                serial_write("SplintOS: failed to load /bin/sh\r\n");
+        }
     }
     interrupts_init();
     if (graphics) {

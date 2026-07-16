@@ -5,3 +5,7 @@
 .gdb_history
 .idea/
 .vscode/
+
+# Local Codex workflow instructions; never publish these files.
+Prompt.md
+Rec.md

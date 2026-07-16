@@ -4,6 +4,7 @@
 #include "kernel.h"
 #include "network.h"
 #include "scheduler.h"
+#include "syscall.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,7 +24,15 @@ struct PACKED idt_entry {
     uint16_t offset_high;
 };
 
-static uint64_t gdt[5];
+struct PACKED task_state_segment {
+    uint32_t previous, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags;
+    uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
+    uint32_t es, cs, ss, ds, fs, gs, ldt;
+    uint16_t trap, iomap;
+};
+
+static uint64_t gdt[6];
+static struct task_state_segment tss;
 static struct idt_entry idt[256];
 static volatile uint32_t ticks;
 
@@ -43,6 +52,7 @@ DECLARE_ISR(32); DECLARE_ISR(33); DECLARE_ISR(34); DECLARE_ISR(35);
 DECLARE_ISR(36); DECLARE_ISR(37); DECLARE_ISR(38); DECLARE_ISR(39);
 DECLARE_ISR(40); DECLARE_ISR(41); DECLARE_ISR(42); DECLARE_ISR(43);
 DECLARE_ISR(44); DECLARE_ISR(45); DECLARE_ISR(46); DECLARE_ISR(47);
+DECLARE_ISR(128);
 
 static void (*const stubs[48])(void) = {
     isr0,isr1,isr2,isr3,isr4,isr5,isr6,isr7,
@@ -124,22 +134,35 @@ void interrupts_init(void)
     gdt[2] = gdt_entry(0, 0xFFFFF, 0x92, 0x0C);
     gdt[3] = gdt_entry(0, 0xFFFFF, 0xFA, 0x0C);
     gdt[4] = gdt_entry(0, 0xFFFFF, 0xF2, 0x0C);
+    tss = (struct task_state_segment){0};
+    tss.ss0 = 0x10;
+    tss.iomap = sizeof(tss);
+    gdt[5] = gdt_entry((uint32_t)(uintptr_t)&tss, sizeof(tss) - 1, 0x89, 0x00);
     struct descriptor_pointer gdtr = {sizeof(gdt) - 1, (uint32_t)(uintptr_t)gdt};
     gdt_flush(&gdtr);
+    __asm__ volatile ("ltr %%ax" : : "a"(0x28));
 
     for (uint16_t i = 0; i < 256; ++i) idt[i] = (struct idt_entry){0};
     for (uint8_t i = 0; i < 48; ++i) set_gate(i, stubs[i], i == 3 ? 0xEE : 0x8E);
+    set_gate(128, isr128, 0xEE);
     struct descriptor_pointer idtr = {sizeof(idt) - 1, (uint32_t)(uintptr_t)idt};
     idt_load(&idtr);
     pic_remap();
     pit_init();
-    serial_write("SplintOS: GDT, IDT, PIC and PIT initialized\r\n");
+    serial_write("SplintOS: GDT, TSS, IDT, PIC and PIT initialized\r\n");
     __asm__ volatile ("sti");
 }
 
 struct interrupt_frame *interrupt_dispatch(struct interrupt_frame *frame)
 {
-    if (frame->vector < 32) kernel_panic(exception_names[frame->vector], frame);
+    if (frame->vector == 128) return syscall_dispatch(frame);
+    if (frame->vector < 32) {
+        if ((frame->cs & 3U) == 3U) {
+            serial_write("SplintOS: terminated faulting user process\r\n");
+            return scheduler_fault(frame);
+        }
+        kernel_panic(exception_names[frame->vector], frame);
+    }
     uint32_t irq = frame->vector - 32;
     if (irq == 0) ++ticks;
     else if (irq == 1 || irq == 4 || irq == 12) devices_poll();
@@ -147,6 +170,11 @@ struct interrupt_frame *interrupt_dispatch(struct interrupt_frame *frame)
     if (irq >= 8) outb(0xA0, 0x20);
     outb(0x20, 0x20);
     return irq == 0 ? scheduler_tick(frame) : frame;
+}
+
+void interrupts_set_kernel_stack(uintptr_t stack_top)
+{
+    tss.esp0 = (uint32_t)stack_top;
 }
 
 uint32_t timer_ticks(void)

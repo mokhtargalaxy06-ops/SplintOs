@@ -26,15 +26,48 @@ fi
 for message in \
     'physical allocator, paging and heap online' \
     'PCI and ACPI discovery complete' \
+    'generic block layer, cache and ramblk0 online' \
+    'validated MBR partition discovered' \
+    'diskfs format, flush and remount online' \
     'preemptive scheduler online' \
     'application runtime online' \
-    'GDT, IDT, PIC and PIT initialized'; do
+    'GDT, TSS, IDT, PIC and PIT initialized' \
+    'ELF loader online' \
+    'loaded /bin/hello ELF32 process' \
+    'loaded /bin/sh ELF32 process' \
+    'loaded /bin/cat ELF32 process' \
+    'hello from ELF user space' \
+    'SplintOS in-memory filesystem is online.' \
+    'SplintOS Ring 3 shell online' \
+    'shell: startup command status=0' \
+    'dup2: shared descriptor online' \
+    'inherited standard output' \
+    'child output crossed a pipe' \
+    'pipe: blocking transfer and EOF online' \
+    'redirected output' \
+    'shell: redirection status=0' \
+    'wc: bytes=15' \
+    'shell: pipeline status=0' \
+    'heaptest' \
+    'memory: total=' \
+    'uptime: ' \
+    'processes: active=' \
+    'heap: userspace brk allocator online' \
+    'disk: multi-sector VFS persistence online' \
+    'user> ' \
+    'ELF user process exited status=0'; do
     grep -q "$message" "$log" || {
         echo "boot log did not contain: $message" >&2
         sed -n '1,160p' "$log" >&2
         exit 1
     }
 done
+
+if [ "$(grep -c 'ELF user process exited status=0' "$log")" -ne 16 ]; then
+    echo "the finite ELF user processes did not exit successfully" >&2
+    sed -n '1,160p' "$log" >&2
+    exit 1
+fi
 
 if grep -q 'KERNEL PANIC' "$log"; then
     echo "kernel panic detected during boot" >&2

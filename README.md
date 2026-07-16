@@ -21,21 +21,37 @@ SplintOS currently provides:
 - Bootable 32-bit x86 kernel and ISO using GRUB Multiboot
 - 800x600 graphical desktop with a software compositor and mouse pointer
 - Interactive Network, Files, and About windows
-- Preemptive multitasking for trusted kernel tasks
+- Preemptive multitasking plus isolated Ring 3 ELF32 processes
 - Physical page allocation, paging, and a coalescing kernel heap
 - Writable RAM filesystem with files, directories, permissions, and `/dev`
+- Generic block devices, a bounded write-back cache, and checked MBR partitions
+- A small educational disk filesystem mounted through the VFS at `/disk`
+- Legacy VirtIO block support with an automated two-boot persistence test
 - Interactive serial command shell with file, memory, task, network, hardware,
   and identity commands
+- Defensive ELF32 loader with separately built `/bin/hello` and `/bin/cat`
+  Ring 3 programs
+- Checked user file syscalls backed by process-owned descriptor tables
+- Bounded argument stacks plus `spawn` and blocking `wait`
+- Ring 3 command shell with event-driven keyboard and serial input
+- Reference-counted open files, inherited standard streams, and `dup2`
+- Separate Ring 3 `/bin/echo` and descriptor-lifecycle test programs
+- Bounded blocking pipes with EOF and peer-close wake-up behavior
+- Atomic child descriptor actions, shell redirection, and two-process pipelines
+- Ring 3 `wc`, `ls`, `mem`, `uptime`, and `ps` commands
+- Page-backed userspace `brk` and a small bump allocator
+- Selectable trusted recovery console from the GRUB menu
 - PS/2 keyboard and mouse input plus COM1 serial diagnostics
 - PCI device enumeration and ACPI RSDP/RSDT discovery
 - RTL8139 Ethernet with ARP, IPv4, ICMP ping, UDP, and DHCP
 - Stack-smashing protection, task identities, capabilities, and VFS permissions
 - Automated ELF, Multiboot, and headless QEMU boot tests
 
-SplintOS is still an experimental educational OS. It cannot yet run normal
-Linux applications, preserve files after shutdown, use most real Wi-Fi/USB/
-audio/GPU hardware, or safely isolate user applications in Ring 3. DNS, TCP,
-TLS, HTTP, persistent storage, ELF user programs, and modern hardware drivers
+SplintOS is still an experimental educational OS. It cannot run Linux
+applications or use most real Wi-Fi, USB,
+audio, and GPU hardware. Its Ring 3 ELF32 environment remains intentionally
+small: pipelines are simple, the heap cannot free memory, and the C library is
+minimal. DNS, TCP, TLS, HTTP, persistent storage, and modern hardware drivers
 remain future work.
 
 ## Graphical desktop
@@ -79,8 +95,9 @@ devices and the high physical framebuffer accessible during early development.
 
 The kernel also provides `physical_page_alloc`/`physical_page_free` and a 1 MiB
 coalescing heap through `kmalloc`/`kfree`. Page-fault panic reports include EIP,
-the CPU error code, and the CR2 faulting address over COM1. Per-process address
-spaces and strict kernel/user isolation belong to the process milestone.
+the CPU error code, and the CR2 faulting address over COM1. User processes have
+private address spaces and can grow a zeroed heap between `0x80000000` and
+`0x90000000` through `brk`.
 
 ## Processes and scheduling
 
@@ -90,10 +107,10 @@ preemptive round-robin scheduler. The 100 Hz timer changes saved interrupt
 frames every five ticks, producing a 20 Hz scheduling quantum. A maintenance
 kernel task is created during boot to exercise context switching and sleeping.
 
-All current tasks execute in kernel mode. Ring 3 processes, isolated page
-directories, system calls, IPC, and ELF user programs are intentionally the
-next sub-milestone: enabling Ring 3 against the current 4 GiB identity map would
-give applications access to the entire kernel and would not be a safe design.
+Kernel services still use trusted Ring 0 tasks, while ELF32 applications run in
+private page directories with supervisor-only kernel mappings. The TSS provides
+kernel-entry stacks. Parent tracking, argument stacks, `spawn`, blocking `wait`,
+descriptor inheritance, and bounded pipes support the Ring 3 shell and commands.
 
 ## Files and directories
 
@@ -103,21 +120,39 @@ append, seek, close, and directory listing through integer file descriptors.
 Boot creates `/dev`, `/etc`, `/tmp`, `/etc/motd`, `/README`, `/dev/null`, and a
 serial output device at `/dev/serial`.
 
-RAM filesystem contents disappear when the machine powers off. Persistent disk
-storage, a block-device cache, ATA/AHCI, and FAT32 are the next storage
-sub-milestone; no on-disk writes are attempted by this version.
+RAM filesystem contents disappear when the machine powers off. A generic block
+layer, 16-sector write-back cache, checked MBR parser, and compact `SPLFS3`
+educational filesystem now run over `ramblk0`. `SPLFS3` is mounted at `/disk`;
+Ring 3 programs use normal file descriptors and can explicitly flush dirty
+blocks. The versioned `SPLFS3` layout stores eight flat files of at most 4 KiB
+each in dynamically placed contiguous extents. A legacy VirtIO block
+driver provides persistent storage under QEMU; `ramblk0` remains the fallback
+and deterministic conformance device. Unknown hardware partitions are probed
+read-only and never formatted automatically. Checked `unlink` removes closed
+files and makes their directory slots and extents reusable; same-directory `rename` preserves
+the source extent and can atomically replace a closed destination through one
+flushed metadata-sector update.
+
+The storage integration suite also boots deterministic images containing an
+unknown filesystem, overlapping extents, and an out-of-range extent. Each must
+be rejected, and a full-image SHA-256 comparison proves the probe wrote nothing.
 
 ## Built-in applications
 
-The scheduler runs an interactive command shell as a separate task. With QEMU,
-the shell is available in the terminal attached through `-serial stdio`; basic
-PS/2 keyboard characters feed the same console queue. Commands include `help`,
-`echo`, `ls`, `cat`, `write`, `mem`, `tasks`, `uptime`, and `net`.
-Additional commands include `devices` and `whoami`.
+The default interactive shell is `/bin/sh`, available in the QEMU terminal
+through `-serial stdio`; PS/2 input feeds the same blocking console queue. It
+launches ELF programs, passes arguments, redirects output with `>`, and supports
+one `producer | consumer` pipeline.
 
-These commands are trusted kernel-mode built-ins, not isolated user programs.
-An ELF loader and normal Ring 3 applications require per-process page tables,
-a TSS, privilege-changing interrupt returns, and a validated system-call ABI.
+The old trusted kernel commands remain available only through the recovery boot
+entry. Normal programs include `sh`, `cat`, `echo`, `wc`, `ls`, `mem`, `uptime`,
+`ps`, and `disk`. The kernel has per-process page tables, user-pointer validation, a
+defensive ELF32 loader, and checked file and process syscalls.
+The default `/bin/sh` shell runs in Ring 3, executes `/bin/cat /README` through
+`spawn` and `wait`, and blocks on descriptor `0` until keyboard or serial input
+arrives. Standard streams are inherited through reference-counted open-file
+objects, and `dup2` supports safe replacement. Child descriptor actions power
+shell redirection and pipelines. `/bin/pipetest` verifies blocking and EOF.
 
 ## UDP and DHCP
 
@@ -203,22 +238,24 @@ For a dedicated cross-compiler, set its prefix explicitly:
 make CROSS=i686-elf-
 ```
 
-The freestanding kernel binary is written to `build/splintos.bin`. If
+The freestanding kernel binary is written to `build/splintos.bin`, and the
+separately linked Ring 3 programs are written under `build/user/`. If
 `grub-file` is installed, verify its Multiboot header with:
 
 ```sh
 make check
 ```
 
-`make test` verifies the Multiboot header, ELF format, entry address, required
+`make test` verifies the Multiboot header, ELF formats, entry address, required
 symbols, and absence of unresolved references. `make test-boot` creates the ISO,
-boots it headlessly for eight seconds, and asserts the expected serial startup
-milestones without a panic. `make debug` waits for GDB on TCP port 1234.
+boots it headlessly, and asserts serial milestones without a panic.
+`make test-storage` performs persistent and corrupted-image VirtIO boots.
+`make debug` waits for GDB on TCP port 1234.
 
 GitHub Actions runs both static and headless boot checks. See
-`CONTRIBUTING.md`, `docs/coding-style.md`, and `docs/hardware-support.md` for the
-development contract and current support matrix. The project is distributed
-under the MIT License.
+[documentation index](docs/README.md) for the development contract,
+architecture, roadmap, build history, and hardware support matrix. The project
+is distributed under the MIT License.
 
 ## Create and run the bootable ISO
 
@@ -243,11 +280,14 @@ sudo apt-get install gcc-multilib grub-pc-bin mtools xorriso qemu-system-x86
 
 ## Project layout
 
-- `src/boot.S` contains the Multiboot header and assembly entry point.
-- `src/kernel.c` contains the first kernel code and VGA text driver.
-- `linker.ld` lays the kernel out at the 1 MiB physical address.
-- `grub/grub.cfg` defines the bootloader entry.
+- `src/` contains kernel and architecture implementation code.
+- `include/` contains kernel subsystem interfaces.
+- `user/` contains the Ring 3 runtime, libc subset, linker script, and programs.
+- `grub/` contains normal and recovery boot entries.
+- `scripts/` contains static, boot, storage, and QEMU launch tooling.
+- `docs/` contains maintained design, support, and style documentation.
+- `Makefile` builds the kernel, user ELF files, ISO, and verification targets.
 
-This is a real kernel foundation, but not yet a general-purpose operating
-system. Useful next steps are a GDT/IDT, interrupt-driven networking, physical
-memory management, paging, DHCP, UDP/TCP, keyboard input, and a command shell.
+SplintOS is an educational operating system, not yet a general-purpose desktop.
+See [NEXT_STEP.md](NEXT_STEP.md) for the immediate milestone and
+[NEXT_STEPS.md](NEXT_STEPS.md) for the longer roadmap.

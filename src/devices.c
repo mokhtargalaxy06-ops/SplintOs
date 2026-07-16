@@ -1,4 +1,5 @@
 #include "devices.h"
+#include "scheduler.h"
 
 #include <stdint.h>
 
@@ -125,6 +126,7 @@ static void handle_keyboard(uint8_t code)
         if (next != console_read) {
             console_buffer[console_write] = keymap[code];
             console_write = next;
+            scheduler_console_wake();
         }
     }
 }
@@ -158,6 +160,7 @@ void devices_poll(void)
             if (next != console_read) {
                 console_buffer[console_write] = character;
                 console_write = next;
+                scheduler_console_wake();
             }
         }
     }

@@ -34,6 +34,9 @@ int vfs_close(int descriptor);
 int vfs_read(int descriptor, void *buffer, size_t count);
 int vfs_write(int descriptor, const void *buffer, size_t count);
 int vfs_seek(int descriptor, size_t offset);
+int vfs_fsync(int descriptor);
+int vfs_unlink(const char *path);
+int vfs_rename(const char *old_path, const char *new_path);
 int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capacity);
 int vfs_chmod(const char *path, uint16_t mode);
 
