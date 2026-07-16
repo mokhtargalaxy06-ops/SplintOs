@@ -109,6 +109,8 @@ static void handle_keyboard(uint8_t code)
     if ((code & 0x80U) != 0) return;
     if (code == 0x4B) pending_key = KEY_LEFT;
     else if (code == 0x4D) pending_key = KEY_RIGHT;
+    else if (code == 0x48) pending_key = KEY_UP;
+    else if (code == 0x50) pending_key = KEY_DOWN;
     else if (code == 0x0F) pending_key = KEY_TAB;
     else if (code == 0x1C) pending_key = KEY_ENTER;
 

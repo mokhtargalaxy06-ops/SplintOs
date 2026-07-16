@@ -8,6 +8,8 @@ enum input_key {
     KEY_NONE,
     KEY_LEFT,
     KEY_RIGHT,
+    KEY_UP,
+    KEY_DOWN,
     KEY_TAB,
     KEY_ENTER,
 };

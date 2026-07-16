@@ -62,6 +62,11 @@ network, and graphics status and provides selectable Network, Files, and About
 buttons. Use Left/Right or Tab to move between buttons. VGA text mode remains a
 fallback if the boot environment cannot provide a compatible framebuffer.
 
+After opening Files, use Up/Down to move the highlighted selection through the
+current directory. Press Enter to open the selected directory and Left to
+return to its parent. The current absolute path is shown above the listing;
+selection wraps between the first and last visible entries.
+
 The UI accepts PS/2 keyboard navigation and PS/2 mouse movement/clicks. The
 kernel also initializes COM1 as a serial diagnostics console; `make run` maps it
 to the launching terminal. The buttons are currently navigation elements only.
@@ -188,8 +193,10 @@ tearing during pointer and widget updates. The desktop includes reusable text,
 rectangle, button, title-bar, and window-frame primitives.
 
 Network, Files, and About now open real overlay windows through Enter or mouse
-clicks. Files lists the current RAM filesystem root, Network shows stack state,
-and About identifies the project. Enter or the red title-bar button closes a
+clicks. Files provides keyboard navigation across VFS directories: Up/Down
+selects an entry, Enter opens a selected directory, and Left returns to the
+parent. Network shows stack state, and About identifies the project. Enter
+closes the Network and About windows; the red title-bar button closes every
 window. This is a software compositor; accelerated GPU commands, scalable font
 rendering, image codecs, and video surfaces are later graphics milestones.
 

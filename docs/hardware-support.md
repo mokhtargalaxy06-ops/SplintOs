@@ -4,7 +4,7 @@
 |---|---|---|
 | CPU | 32-bit x86 | GRUB Multiboot, GDT, IDT, legacy PIC/PIT |
 | Graphics | VBE linear framebuffer | 800x600x32 software compositor |
-| Keyboard/mouse | PS/2 | IRQ-driven with polling fallback |
+| Keyboard/mouse | PS/2 | IRQ-driven with polling fallback; desktop Left/Right/Tab and Files Up/Down/Enter/Left navigation |
 | Serial | 16550-compatible COM1 | Diagnostics and command shell |
 | Bus discovery | PCI configuration mechanism 1 | Up to 64 recorded functions |
 | Firmware | ACPI RSDP/RSDT discovery | Table interpretation incomplete |

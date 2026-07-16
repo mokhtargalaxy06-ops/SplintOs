@@ -28,6 +28,8 @@ static uint32_t canvas[800 * 600] __attribute__((aligned(16)));
 static uint32_t width, height, pitch;
 static bool network_connected;
 static uint8_t selected;
+static uint8_t file_selected;
+static char file_path[128] = "/";
 static int cursor_x = 400, cursor_y = 300;
 static uint8_t active_window;
 static int dirty_left, dirty_top, dirty_right, dirty_bottom;
@@ -107,6 +109,30 @@ static void text(int x, int y, const char *value, uint32_t color, int scale)
     }
 }
 
+static bool file_path_enter(const char *name)
+{
+    size_t length = 0;
+    size_t name_length = 0;
+    while (file_path[length] != '\0') ++length;
+    while (name[name_length] != '\0') ++name_length;
+    size_t separator = length > 1 ? 1 : 0;
+    if (length + separator + name_length >= sizeof(file_path)) return false;
+    if (separator != 0) file_path[length++] = '/';
+    for (size_t i = 0; i < name_length; ++i) file_path[length++] = name[i];
+    file_path[length] = '\0';
+    return true;
+}
+
+static void file_path_parent(void)
+{
+    size_t length = 0;
+    while (file_path[length] != '\0') ++length;
+    if (length <= 1) return;
+    while (length > 1 && file_path[length - 1] != '/') --length;
+    if (length > 1) --length;
+    file_path[length] = '\0';
+}
+
 static void button(int index, int x, const char *label)
 {
     uint32_t fill = selected == index ? 0x2563EB : 0x25334A;
@@ -145,13 +171,18 @@ static void draw_window(void)
     } else if (active_window == 2) {
         window_frame("FILES");
         struct vfs_directory_entry entries[8];
-        int count = vfs_list("/", entries, 8);
+        int count = vfs_list(file_path, entries, 8);
+        text(165, 180, file_path, 0x94A3B8, 1);
         int y = 200;
         for (int i = 0; i < count; ++i) {
+            if (file_selected == (uint8_t)i) {
+                rectangle(153, y - 9, 480, 27, 0x2563EB);
+            }
             text(165, y, entries[i].type == VFS_DIRECTORY ? "DIR" : "FILE", 0x7DD3FC, 1);
             text(230, y, entries[i].name, 0xF8FAFC, 2);
             y += 32;
         }
+        text(165, 413, "UP/DOWN SELECT  ENTER OPEN  LEFT BACK", 0x94A3B8, 1);
     } else {
         window_frame("ABOUT SPLINTOS");
         text(165, 210, "EXPERIMENTAL X86 OPERATING SYSTEM", 0xF8FAFC, 2);
@@ -236,8 +267,34 @@ void gui_poll(void)
     } else if ((key == KEY_RIGHT || key == KEY_TAB) && active_window == 0) {
         selected = (uint8_t)((selected + 1) % 3);
         invalidate(50, 485, 700, 62); redraw = true;
+    } else if ((key == KEY_UP || key == KEY_DOWN) && active_window == 2) {
+        struct vfs_directory_entry entries[8];
+        int count = vfs_list(file_path, entries, 8);
+        if (count > 0) {
+            if (key == KEY_UP)
+                file_selected = file_selected == 0 ? (uint8_t)(count - 1)
+                                                   : (uint8_t)(file_selected - 1);
+            else
+                file_selected = (uint8_t)((file_selected + 1) % count);
+            invalidate(145, 180, 500, 245); redraw = true;
+        }
+    } else if (key == KEY_LEFT && active_window == 2) {
+        file_path_parent();
+        file_selected = 0;
+        invalidate(145, 170, 500, 270); redraw = true;
     } else if (key == KEY_ENTER) {
-        active_window = active_window == 0 ? (uint8_t)(selected + 1) : 0;
+        if (active_window == 2) {
+            struct vfs_directory_entry entries[8];
+            int count = vfs_list(file_path, entries, 8);
+            if (count > 0 && file_selected < (uint8_t)count &&
+                entries[file_selected].type == VFS_DIRECTORY &&
+                file_path_enter(entries[file_selected].name)) {
+                file_selected = 0;
+                invalidate(145, 170, 500, 270); redraw = true;
+            }
+        } else {
+            active_window = active_window == 0 ? (uint8_t)(selected + 1) : 0;
+        }
         invalidate(125, 110, 550, 370); redraw = true;
     }
 
