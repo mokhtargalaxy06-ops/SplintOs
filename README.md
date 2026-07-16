@@ -4,6 +4,14 @@ SplintOS is a tiny educational x86 kernel. It boots through GRUB's Multiboot
 interface, creates its own stack, enters C code, and writes directly to VGA text
 memory. It also includes an RTL8139 driver and a small Ethernet stack.
 
+SplintOS has an independent kernel written from scratch in C and x86 assembly.
+GRUB starts it, but it does not use:
+
+- The Linux kernel
+- GNU/Linux userland
+- Linux drivers
+- Linux applications or package managers
+
 ![SplintOS graphical desktop](docs/images/splintos-desktop.png)
 
 ## What can SplintOS do?
