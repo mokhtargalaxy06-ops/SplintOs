@@ -1,0 +1,7 @@
+/build/
+*.o
+*.iso
+*.log
+.gdb_history
+.idea/
+.vscode/
