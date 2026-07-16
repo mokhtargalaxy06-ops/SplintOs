@@ -315,6 +315,15 @@ On Debian/Ubuntu, the relevant packages are commonly `gcc-multilib`,
 sudo apt-get install gcc-multilib grub-pc-bin mtools xorriso qemu-system-x86
 ```
 
+## Contributions welcome
+
+SplintOS is ready to welcome contributors from around the globe. Whether you are
+learning operating-system development or bringing experience in kernels,
+drivers, filesystems, networking, testing, documentation, or user interfaces,
+your ideas and contributions are welcome. Review the project documentation and
+roadmap, choose a small testable milestone, and open an issue or pull request to
+collaborate.
+
 ## Project layout
 
 - `src/` contains kernel and architecture implementation code.
