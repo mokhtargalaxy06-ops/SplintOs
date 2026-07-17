@@ -324,6 +324,9 @@ your ideas and contributions are welcome. Review the project documentation and
 roadmap, choose a small testable milestone, and open an issue or pull request to
 collaborate.
 
+I’m ready to collaborate on ideas, features, documentation, and contributions.
+Contact me at [mokhtargalaxy06@gmail.com](mailto:mokhtargalaxy06@gmail.com).
+
 ## Project layout
 
 - `src/` contains kernel and architecture implementation code.
