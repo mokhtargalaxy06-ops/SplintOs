@@ -8,7 +8,7 @@ for path in src src/arch/x86_64 include include/arch/x86 user user/libc user/pro
         exit 1
     fi
 done
-for path in Makefile linker.ld user/linker.ld RoadMap.md RoadMapSteps.md; do
+for path in Makefile linker.ld user/linker.ld; do
     if [ ! -f "$root/$path" ]; then
         echo "required repository file missing: $path" >&2
         exit 1

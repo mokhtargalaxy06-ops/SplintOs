@@ -9,16 +9,15 @@ Use the following reading order:
    ABI ownership, verification profiles, and known gaps.
 4. [Current milestone](../NEXT_STEP.md) — the next bounded implementation target.
 5. [Long-term roadmap](../NEXT_STEPS.md) — phases toward a useful educational OS.
-6. [Production roadmap steps](../RoadMapSteps.md) — ordered implementation and verification gates.
-7. [Build history](../HOW_I_BUILT_SPLINTOS.md) — chronological implementation record.
-8. [Hardware support](hardware-support.md) — tested devices and explicit limitations.
-9. [Coding style](coding-style.md) — source and interface conventions.
-10. [Debugging](debugging.md) — QEMU/GDB startup, symbols, panic analysis, and postmortem workflow.
-11. [x86_64 foundation](x86_64-design.md) — long-mode address map and data-model contracts.
-12. [Contributing](../CONTRIBUTING.md) — required development and verification workflow.
-13. [Ownership and lifetime](ownership.md) — allocation, transfer, borrowing, and release rules.
-14. [SPLFS5 format](splfs5.md) — timestamp layout, semantics, and migration policy.
-15. [Screenshots](screenshots.md) — current desktop and every interactive window.
+6. [Build history](../HOW_I_BUILT_SPLINTOS.md) — chronological implementation record.
+7. [Hardware support](hardware-support.md) — tested devices and explicit limitations.
+8. [Coding style](coding-style.md) — source and interface conventions.
+9. [Debugging](debugging.md) — QEMU/GDB startup, symbols, panic analysis, and postmortem workflow.
+10. [x86_64 foundation](x86_64-design.md) — long-mode address map and data-model contracts.
+11. [Contributing](../CONTRIBUTING.md) — required development and verification workflow.
+12. [Ownership and lifetime](ownership.md) — allocation, transfer, borrowing, and release rules.
+13. [SPLFS5 format](splfs5.md) — timestamp layout, semantics, and migration policy.
+14. [Screenshots](screenshots.md) — current desktop and every interactive window.
 
 ## Documentation roles
 
