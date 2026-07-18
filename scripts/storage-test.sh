@@ -89,6 +89,29 @@ run_readonly_probe()
     fi
 }
 
+run_legacy_probe()
+{
+    legacy=$1
+    log=$2
+    rm -f "$log"
+    before=$(sha256sum "$legacy" | cut -d ' ' -f 1)
+    status=0
+    # shellcheck disable=SC2086
+    timeout 8 $qemu -boot d -cdrom "$iso" \
+        -drive "file=$legacy,if=none,format=raw,id=legacy" \
+        -device virtio-blk-pci,drive=legacy,disable-modern=on \
+        -nic user,model=rtl8139 -display none -monitor none \
+        -serial "file:$log" -no-reboot -no-shutdown || status=$?
+    if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then exit "$status"; fi
+    grep -q 'SPLFS4 mounted read-only on virtblk0' "$log"
+    grep -q 'disk: open failed' "$log"
+    after=$(sha256sum "$legacy" | cut -d ' ' -f 1)
+    if [ "$before" != "$after" ]; then
+        echo "SPLFS4 compatibility mount modified the disk" >&2
+        exit 1
+    fi
+}
+
 "$(dirname "$0")/create-test-disk.sh" "$image"
 run_boot "${prefix}-first.log"
 grep -q 'existing diskfs mounted on virtblk0' "${prefix}-first.log"
@@ -118,4 +141,7 @@ run_unknown_probe "$dirty_directory" "${prefix}-dirty-directory.log"
 dirty_bitmap="${image}.dirty-bitmap"
 "$(dirname "$0")/create-test-disk.sh" "$dirty_bitmap" dirty-bitmap
 run_readonly_probe "$dirty_bitmap" "${prefix}-dirty-bitmap.log"
-echo "VirtIO persistence and boundary-specific dirty recovery verified"
+legacy="${image}.legacy"
+"$(dirname "$0")/create-test-disk.sh" "$legacy" legacy
+run_legacy_probe "$legacy" "${prefix}-legacy.log"
+echo "VirtIO persistence, dirty recovery, and SPLFS4 compatibility verified"

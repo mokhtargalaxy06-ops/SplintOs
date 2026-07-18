@@ -33,12 +33,38 @@ struct PACKED superblock {
 struct PACKED directory_entry {
     char name[NAME_SIZE];
     uint32_t size, first_sector, sector_count;
+    uint32_t birth_time, modification_time, change_time;
 };
 
 struct PACKED directory_sector {
     struct directory_entry entries[FILE_COUNT];
     uint8_t reserved[SECTOR_SIZE - FILE_COUNT * sizeof(struct directory_entry)];
 };
+
+struct PACKED legacy_directory_entry {
+    char name[NAME_SIZE];
+    uint32_t size, first_sector, sector_count;
+};
+
+struct PACKED legacy_directory_sector {
+    struct legacy_directory_entry entries[FILE_COUNT];
+    uint8_t reserved[SECTOR_SIZE - FILE_COUNT * sizeof(struct legacy_directory_entry)];
+};
+
+_Static_assert(sizeof(struct directory_entry) == 56, "SPLFS5 entry layout changed");
+_Static_assert(sizeof(struct directory_sector) == SECTOR_SIZE,
+               "SPLFS5 directory must occupy one sector");
+_Static_assert(sizeof(struct legacy_directory_entry) == 44,
+               "SPLFS4 entry layout changed");
+_Static_assert(sizeof(struct legacy_directory_sector) == SECTOR_SIZE,
+               "SPLFS4 directory must occupy one sector");
+
+static uint32_t current_timestamp(void)
+{
+    uint32_t seconds = 0;
+    (void)devices_wall_clock_seconds(&seconds);
+    return seconds;
+}
 
 static const struct partition *mounted_partition;
 static struct directory_sector directory;
@@ -129,7 +155,9 @@ static bool directory_valid(uint8_t expected_bitmap[SECTOR_SIZE])
     for (size_t i = 0; i < FILE_COUNT; ++i) {
         const struct directory_entry *entry = &directory.entries[i];
         if (entry->name[0] == '\0') {
-            if (entry->size != 0 || entry->first_sector != 0 || entry->sector_count != 0)
+            if (entry->size != 0 || entry->first_sector != 0 ||
+                entry->sector_count != 0 || entry->birth_time != 0 ||
+                entry->modification_time != 0 || entry->change_time != 0)
                 return false;
             continue;
         }
@@ -157,6 +185,8 @@ static bool directory_valid(uint8_t expected_bitmap[SECTOR_SIZE])
     for (uint32_t sector = mounted_partition->sector_count;
          sector < sizeof(allocation_bitmap) * 8U; ++sector)
         expected_bitmap[sector / 8] |= (uint8_t)(1U << (sector % 8));
+    for (size_t i = 0; i < sizeof(directory.reserved); ++i)
+        if (directory.reserved[i] != 0) return false;
     return true;
 }
 
@@ -164,7 +194,7 @@ static int format_partition(void)
 {
     mounted_read_only = false;
     mounted_superblock = (struct superblock){
-        {'S','P','L','F','S','4','\0','\0'}, 4, FILE_COUNT,
+        {'S','P','L','F','S','5','\0','\0'}, 5, FILE_COUNT,
         SECTORS_PER_FILE, DIRECTORY_SECTOR, BITMAP_SECTOR, DATA_START,
         FEATURE_ALLOCATION_BITMAP, STATE_CLEAN, 0, 0, {0}};
     directory = (struct directory_sector){0};
@@ -188,15 +218,18 @@ static int mount_partition(void)
 {
     mounted_read_only = false;
     if (partition_read(mounted_partition, 0, &mounted_superblock) != 0) return -1;
-    static const char magic[8] = {'S','P','L','F','S','4','\0','\0'};
-    if (!bytes_equal(mounted_superblock.magic, magic, sizeof(magic))) {
+    static const char magic5[8] = {'S','P','L','F','S','5','\0','\0'};
+    static const char magic4[8] = {'S','P','L','F','S','4','\0','\0'};
+    bool legacy = bytes_equal(mounted_superblock.magic, magic4, sizeof(magic4));
+    if (!legacy && !bytes_equal(mounted_superblock.magic, magic5, sizeof(magic5))) {
         if (!text_equal(mounted_partition->device->name, "ramblk0")) return -1;
         formatted_on_mount = true;
         if (format_partition() != 0 ||
             partition_read(mounted_partition, 0, &mounted_superblock) != 0)
             return -1;
     }
-    if (mounted_superblock.version != 4 || mounted_superblock.entry_count != FILE_COUNT ||
+    if (mounted_superblock.version != (legacy ? 4U : 5U) ||
+        mounted_superblock.entry_count != FILE_COUNT ||
         mounted_superblock.sectors_per_file != SECTORS_PER_FILE ||
         mounted_superblock.directory_sector != DIRECTORY_SECTOR ||
         mounted_superblock.bitmap_sector != BITMAP_SECTOR ||
@@ -207,11 +240,25 @@ static int mount_partition(void)
         mounted_partition->sector_count <= DATA_START ||
         mounted_partition->sector_count > sizeof(allocation_bitmap) * 8U)
         return -1;
-    if (partition_read(mounted_partition, DIRECTORY_SECTOR, &directory) != 0 ||
+    struct legacy_directory_sector legacy_directory;
+    void *raw_directory = legacy ? (void *)&legacy_directory : (void *)&directory;
+    if (partition_read(mounted_partition, DIRECTORY_SECTOR, raw_directory) != 0 ||
         partition_read(mounted_partition, BITMAP_SECTOR, allocation_bitmap) != 0)
         return -1;
-    if (mounted_superblock.directory_checksum != checksum32(&directory, sizeof(directory))) {
+    if (mounted_superblock.directory_checksum != checksum32(raw_directory, SECTOR_SIZE)) {
         serial_write("SplintOS: diskfs directory checksum mismatch\r\n"); return -1;
+    }
+    if (legacy) {
+        for (size_t i = 0; i < sizeof(legacy_directory.reserved); ++i)
+            if (legacy_directory.reserved[i] != 0) return -1;
+        directory = (struct directory_sector){0};
+        for (size_t i = 0; i < FILE_COUNT; ++i) {
+            for (size_t j = 0; j < NAME_SIZE; ++j)
+                directory.entries[i].name[j] = legacy_directory.entries[i].name[j];
+            directory.entries[i].size = legacy_directory.entries[i].size;
+            directory.entries[i].first_sector = legacy_directory.entries[i].first_sector;
+            directory.entries[i].sector_count = legacy_directory.entries[i].sector_count;
+        }
     }
     uint8_t expected_bitmap[SECTOR_SIZE];
     if (!directory_valid(expected_bitmap)) {
@@ -230,6 +277,7 @@ static int mount_partition(void)
     if (!bytes_equal(expected_bitmap, allocation_bitmap, sizeof(allocation_bitmap))) {
         serial_write("SplintOS: diskfs allocation map mismatch\r\n"); return -1;
     }
+    if (legacy) mounted_read_only = true;
     return 0;
 }
 
@@ -283,6 +331,18 @@ int diskfs_write_file(const char *name, const void *data, size_t size)
     directory.entries[slot].size = size;
     directory.entries[slot].first_sector = first;
     directory.entries[slot].sector_count = needed;
+    uint32_t now = current_timestamp();
+    if (previous.name[0] == '\0') {
+        directory.entries[slot].birth_time = now;
+        directory.entries[slot].modification_time = now;
+        directory.entries[slot].change_time = now;
+    } else {
+        directory.entries[slot].birth_time = previous.birth_time;
+        directory.entries[slot].modification_time =
+            now != 0 ? now : previous.modification_time;
+        directory.entries[slot].change_time =
+            now != 0 ? now : previous.change_time;
+    }
     return commit_metadata();
 }
 
@@ -309,8 +369,12 @@ int diskfs_read_file(const char *name, void *data, size_t capacity)
 }
 
 int diskfs_flush(void)
-{ return !mounted || mounted_read_only || mounted_partition == NULL
-    ? -1 : partition_flush(mounted_partition); }
+{
+    if (!mounted) return KERNEL_ERROR_NOT_FOUND;
+    if (mounted_read_only) return KERNEL_ERROR_UNSUPPORTED;
+    if (mounted_partition == NULL) return KERNEL_ERROR_INVALID;
+    return partition_flush(mounted_partition);
+}
 
 int diskfs_unmount(void)
 {
@@ -332,9 +396,61 @@ int diskfs_list(struct diskfs_entry *entries, size_t capacity)
         }
         entries[count].name[j] = '\0';
         entries[count].size = directory.entries[i].size;
+        entries[count].birth_time = directory.entries[i].birth_time;
+        entries[count].modification_time = directory.entries[i].modification_time;
+        entries[count].change_time = directory.entries[i].change_time;
         ++count;
     }
     return (int)count;
+}
+
+int diskfs_stat(const char *name, struct diskfs_entry *entry)
+{
+    if (!mounted || name == NULL || entry == NULL) return KERNEL_ERROR_INVALID;
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        if (!name_equal(directory.entries[i].name, name)) continue;
+        *entry = (struct diskfs_entry){0};
+        size_t j = 0;
+        while (j + 1 < DISKFS_NAME_SIZE && directory.entries[i].name[j] != '\0') {
+            entry->name[j] = directory.entries[i].name[j];
+            ++j;
+        }
+        entry->name[j] = '\0';
+        entry->size = directory.entries[i].size;
+        entry->birth_time = directory.entries[i].birth_time;
+        entry->modification_time = directory.entries[i].modification_time;
+        entry->change_time = directory.entries[i].change_time;
+        return KERNEL_OK;
+    }
+    return KERNEL_ERROR_NOT_FOUND;
+}
+
+int diskfs_touch_metadata(const char *name)
+{
+    if (!mounted || mounted_read_only || name == NULL) return KERNEL_ERROR_INVALID;
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        if (!name_equal(directory.entries[i].name, name)) continue;
+        uint32_t previous = directory.entries[i].change_time;
+        uint32_t now = current_timestamp();
+        if (now != 0) directory.entries[i].change_time = now;
+        if (commit_metadata() == KERNEL_OK) return KERNEL_OK;
+        directory.entries[i].change_time = previous;
+        return KERNEL_ERROR_IO;
+    }
+    return KERNEL_ERROR_NOT_FOUND;
+}
+
+int diskfs_migrate_legacy(void)
+{
+    if (!mounted || mounted_partition == NULL || !mounted_read_only ||
+        mounted_superblock.version != 4) return KERNEL_ERROR_UNSUPPORTED;
+    static const char magic5[8] = {'S','P','L','F','S','5','\0','\0'};
+    for (size_t i = 0; i < sizeof(magic5); ++i)
+        mounted_superblock.magic[i] = magic5[i];
+    mounted_superblock.version = 5;
+    mounted_read_only = false;
+    if (commit_metadata() != KERNEL_OK) return KERNEL_ERROR_IO;
+    return KERNEL_OK;
 }
 
 int diskfs_unlink(const char *name)
@@ -379,6 +495,8 @@ int diskfs_rename(const char *old_name, const char *new_name)
     for (size_t i = 0; i < NAME_SIZE; ++i) directory.entries[source].name[i] = 0;
     for (size_t i = 0; i <= new_length; ++i)
         directory.entries[source].name[i] = new_name[i];
+    uint32_t now = current_timestamp();
+    if (now != 0) directory.entries[source].change_time = now;
     if (commit_metadata() != 0) {
         directory.entries[source] = previous_source;
         if (target != FILE_COUNT) {
@@ -438,6 +556,41 @@ static bool full_disk_conformance(void)
     return format_partition() == 0 && mount_partition() == 0 && passed;
 }
 
+static bool legacy_migration_conformance(void)
+{
+    struct legacy_directory_sector legacy_directory = {0};
+    struct superblock legacy_superblock = {
+        {'S','P','L','F','S','4','\0','\0'}, 4, FILE_COUNT,
+        SECTORS_PER_FILE, DIRECTORY_SECTOR, BITMAP_SECTOR, DATA_START,
+        FEATURE_ALLOCATION_BITMAP, STATE_CLEAN, 0, 0, {0}
+    };
+    for (size_t i = 0; i < sizeof(allocation_bitmap); ++i) allocation_bitmap[i] = 0;
+    for (uint32_t sector = 0; sector < DATA_START; ++sector)
+        set_sector_allocated(sector, true);
+    for (uint32_t sector = mounted_partition->sector_count;
+         sector < sizeof(allocation_bitmap) * 8U; ++sector)
+        set_sector_allocated(sector, true);
+    legacy_superblock.directory_checksum =
+        checksum32(&legacy_directory, sizeof(legacy_directory));
+    legacy_superblock.bitmap_checksum =
+        checksum32(allocation_bitmap, sizeof(allocation_bitmap));
+    bool written = partition_write(mounted_partition, DIRECTORY_SECTOR,
+                                   &legacy_directory) == KERNEL_OK &&
+                   partition_write(mounted_partition, BITMAP_SECTOR,
+                                   allocation_bitmap) == KERNEL_OK &&
+                   partition_write(mounted_partition, 0, &legacy_superblock) == KERNEL_OK &&
+                   partition_flush(mounted_partition) == KERNEL_OK;
+    mounted = false;
+    bool passed = written && mount_partition() == KERNEL_OK;
+    mounted = passed;
+    passed = passed && mounted_read_only && diskfs_migrate_legacy() == KERNEL_OK;
+    mounted = passed;
+    passed = passed && mount_partition() == KERNEL_OK && !mounted_read_only &&
+             mounted_superblock.version == 5;
+    mounted = passed;
+    return format_partition() == KERNEL_OK && mount_partition() == KERNEL_OK && passed;
+}
+
 void diskfs_init(void)
 {
     formatted_on_mount = false;
@@ -455,7 +608,10 @@ void diskfs_init(void)
     }
     mounted = true;
     if (mounted_read_only) {
-        serial_write("SplintOS: dirty diskfs mounted read-only on virtblk0\r\n");
+        if (mounted_superblock.version == 4)
+            serial_write("SplintOS: SPLFS4 mounted read-only on virtblk0\r\n");
+        else
+            serial_write("SplintOS: dirty diskfs mounted read-only on virtblk0\r\n");
         return;
     }
     if (text_equal(mounted_partition->device->name, "ramblk0")) {
@@ -469,6 +625,11 @@ void diskfs_init(void)
             serial_write("SplintOS: diskfs full-disk test failed\r\n"); return;
         }
         serial_write("SplintOS: diskfs full-disk reclamation online\r\n");
+        if (!legacy_migration_conformance()) {
+            mounted = false;
+            serial_write("SplintOS: diskfs legacy migration test failed\r\n"); return;
+        }
+        serial_write("SplintOS: diskfs explicit legacy migration online\r\n");
     }
     static const char message[] = "diskfs multi-sector remount data";
     int conformance_write = diskfs_write_file("conformance.txt", message, sizeof(message));

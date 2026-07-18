@@ -2,6 +2,7 @@
 
 #include "devices.h"
 #include "scheduler.h"
+#include "arch/x86/cpu.h"
 
 #include <stdint.h>
 
@@ -47,7 +48,7 @@ void security_audit(const char *event)
 
 void __stack_chk_fail(void)
 {
-    __asm__ volatile ("cli");
+    arch_interrupts_disable();
     serial_write("\r\nKERNEL PANIC: stack corruption detected\r\n");
-    for (;;) __asm__ volatile ("hlt");
+    for (;;) arch_cpu_halt();
 }

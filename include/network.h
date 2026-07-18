@@ -6,8 +6,8 @@
 #include <stdint.h>
 
 bool network_init(void);
-void network_poll(void);
-void network_interrupt(void);
+void network_interrupt(uint8_t irq);
+int network_irq(void);
 int udp_open(uint16_t local_port);
 int udp_close(int socket);
 int udp_receive(int socket, void *data, size_t capacity, uint8_t source_ip[4],

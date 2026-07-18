@@ -1,8 +1,10 @@
+#include <splint/abi.h>
+
 .section .text
 .global sys_write
 sys_write:
     push %ebx
-    mov $1, %eax
+    mov $SPLINT_SYS_WRITE, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     mov 16(%esp), %edx
@@ -12,7 +14,7 @@ sys_write:
 
 .global sys_exit
 sys_exit:
-    mov $2, %eax
+    mov $SPLINT_SYS_EXIT, %eax
     mov 4(%esp), %ebx
     int $0x80
 1:
@@ -21,7 +23,7 @@ sys_exit:
 .global sys_open
 sys_open:
     push %ebx
-    mov $3, %eax
+    mov $SPLINT_SYS_OPEN, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -31,7 +33,7 @@ sys_open:
 .global sys_read
 sys_read:
     push %ebx
-    mov $4, %eax
+    mov $SPLINT_SYS_READ, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     mov 16(%esp), %edx
@@ -42,7 +44,7 @@ sys_read:
 .global sys_close
 sys_close:
     push %ebx
-    mov $5, %eax
+    mov $SPLINT_SYS_CLOSE, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -50,14 +52,14 @@ sys_close:
 
 .global sys_getpid
 sys_getpid:
-    mov $6, %eax
+    mov $SPLINT_SYS_GETPID, %eax
     int $0x80
     ret
 
 .global sys_spawn
 sys_spawn:
     push %ebx
-    mov $7, %eax
+    mov $SPLINT_SYS_SPAWN, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     mov 16(%esp), %edx
@@ -68,7 +70,7 @@ sys_spawn:
 .global sys_wait
 sys_wait:
     push %ebx
-    mov $8, %eax
+    mov $SPLINT_SYS_WAIT, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -78,7 +80,7 @@ sys_wait:
 .global sys_dup2
 sys_dup2:
     push %ebx
-    mov $9, %eax
+    mov $SPLINT_SYS_DUP2, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -88,7 +90,7 @@ sys_dup2:
 .global sys_pipe
 sys_pipe:
     push %ebx
-    mov $10, %eax
+    mov $SPLINT_SYS_PIPE, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -97,7 +99,7 @@ sys_pipe:
 .global sys_spawn_actions
 sys_spawn_actions:
     push %ebx
-    mov $11, %eax
+    mov $SPLINT_SYS_SPAWN_ACTIONS, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -106,7 +108,7 @@ sys_spawn_actions:
 .global sys_list
 sys_list:
     push %ebx
-    mov $12, %eax
+    mov $SPLINT_SYS_LIST, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     mov 16(%esp), %edx
@@ -117,7 +119,7 @@ sys_list:
 .global sys_memory_info
 sys_memory_info:
     push %ebx
-    mov $13, %eax
+    mov $SPLINT_SYS_MEMORY_INFO, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -125,14 +127,14 @@ sys_memory_info:
 
 .global sys_uptime
 sys_uptime:
-    mov $14, %eax
+    mov $SPLINT_SYS_UPTIME, %eax
     int $0x80
     ret
 
 .global sys_process_info
 sys_process_info:
     push %ebx
-    mov $15, %eax
+    mov $SPLINT_SYS_PROCESS_INFO, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -141,7 +143,7 @@ sys_process_info:
 .global sys_brk
 sys_brk:
     push %ebx
-    mov $16, %eax
+    mov $SPLINT_SYS_BRK, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -149,14 +151,14 @@ sys_brk:
 
 .global sys_yield
 sys_yield:
-    mov $17, %eax
+    mov $SPLINT_SYS_YIELD, %eax
     int $0x80
     ret
 
 .global sys_sleep
 sys_sleep:
     push %ebx
-    mov $18, %eax
+    mov $SPLINT_SYS_SLEEP, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -165,7 +167,7 @@ sys_sleep:
 .global sys_seek
 sys_seek:
     push %ebx
-    mov $19, %eax
+    mov $SPLINT_SYS_SEEK, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -175,7 +177,7 @@ sys_seek:
 .global sys_fsync
 sys_fsync:
     push %ebx
-    mov $20, %eax
+    mov $SPLINT_SYS_FSYNC, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -184,7 +186,7 @@ sys_fsync:
 .global sys_unlink
 sys_unlink:
     push %ebx
-    mov $21, %eax
+    mov $SPLINT_SYS_UNLINK, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -193,7 +195,7 @@ sys_unlink:
 .global sys_rename
 sys_rename:
     push %ebx
-    mov $22, %eax
+    mov $SPLINT_SYS_RENAME, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -203,7 +205,7 @@ sys_rename:
 .global sys_log_read
 sys_log_read:
     push %ebx
-    mov $23, %eax
+    mov $SPLINT_SYS_LOG_READ, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -213,7 +215,7 @@ sys_log_read:
 .global sys_stat
 sys_stat:
     push %ebx
-    mov $24, %eax
+    mov $SPLINT_SYS_STAT, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -223,7 +225,7 @@ sys_stat:
 .global sys_uname
 sys_uname:
     push %ebx
-    mov $25, %eax
+    mov $SPLINT_SYS_UNAME, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -232,7 +234,7 @@ sys_uname:
 .global sys_truncate
 sys_truncate:
     push %ebx
-    mov $26, %eax
+    mov $SPLINT_SYS_TRUNCATE, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -242,7 +244,7 @@ sys_truncate:
 .global sys_mkdir
 sys_mkdir:
     push %ebx
-    mov $27, %eax
+    mov $SPLINT_SYS_MKDIR, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -251,7 +253,7 @@ sys_mkdir:
 .global sys_rmdir
 sys_rmdir:
     push %ebx
-    mov $28, %eax
+    mov $SPLINT_SYS_RMDIR, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -260,7 +262,7 @@ sys_rmdir:
 .global sys_chmod
 sys_chmod:
     push %ebx
-    mov $29, %eax
+    mov $SPLINT_SYS_CHMOD, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     int $0x80
@@ -269,14 +271,14 @@ sys_chmod:
 
 .global sys_getuid
 sys_getuid:
-    mov $30, %eax
+    mov $SPLINT_SYS_GETUID, %eax
     int $0x80
     ret
 
 .global sys_poll
 sys_poll:
     push %ebx
-    mov $31, %eax
+    mov $SPLINT_SYS_POLL, %eax
     mov 8(%esp), %ebx
     mov 12(%esp), %ecx
     mov 16(%esp), %edx
@@ -287,7 +289,7 @@ sys_poll:
 .global sys_clock_get
 sys_clock_get:
     push %ebx
-    mov $32, %eax
+    mov $SPLINT_SYS_CLOCK_GET, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -296,7 +298,7 @@ sys_clock_get:
 .global sys_udp_open
 sys_udp_open:
     push %ebx
-    mov $33, %eax
+    mov $SPLINT_SYS_UDP_OPEN, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -306,7 +308,7 @@ sys_udp_open:
 sys_udp_send:
     push %ebx
     push %esi
-    mov $34, %eax
+    mov $SPLINT_SYS_UDP_SEND, %eax
     mov 12(%esp), %ebx
     mov 16(%esp), %ecx
     mov 20(%esp), %edx
@@ -320,7 +322,7 @@ sys_udp_send:
 sys_udp_receive:
     push %ebx
     push %esi
-    mov $35, %eax
+    mov $SPLINT_SYS_UDP_RECEIVE, %eax
     mov 12(%esp), %ebx
     mov 16(%esp), %ecx
     mov 20(%esp), %edx
@@ -333,7 +335,7 @@ sys_udp_receive:
 .global sys_network_config
 sys_network_config:
     push %ebx
-    mov $36, %eax
+    mov $SPLINT_SYS_NETWORK_CONFIG, %eax
     mov 8(%esp), %ebx
     int $0x80
     pop %ebx
@@ -342,8 +344,34 @@ sys_network_config:
 .global sys_wall_clock
 sys_wall_clock:
     push %ebx
-    mov $37, %eax
+    mov $SPLINT_SYS_WALL_CLOCK, %eax
     mov 8(%esp), %ebx
+    int $0x80
+    pop %ebx
+    ret
+
+.global sys_stat_timestamps
+sys_stat_timestamps:
+    push %ebx
+    mov $SPLINT_SYS_STAT_TIMESTAMPS, %eax
+    mov 8(%esp), %ebx
+    mov 12(%esp), %ecx
+    int $0x80
+    pop %ebx
+    ret
+
+.global sys_getpgrp
+sys_getpgrp:
+    mov $SPLINT_SYS_GETPGRP, %eax
+    int $0x80
+    ret
+
+.global sys_setpgid
+sys_setpgid:
+    push %ebx
+    mov $SPLINT_SYS_SETPGID, %eax
+    mov 8(%esp), %ebx
+    mov 12(%esp), %ecx
     int $0x80
     pop %ebx
     ret

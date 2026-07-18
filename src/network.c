@@ -1,4 +1,5 @@
 #include "network.h"
+#include "arch/x86/io.h"
 
 #include "kernel.h"
 #include "hardware.h"
@@ -88,6 +89,7 @@ struct udp_socket {
 };
 
 static uint16_t io_base;
+static uint8_t interrupt_line = 0xFF;
 static uint16_t rx_offset;
 static uint8_t mac[6];
 static uint8_t ip[4] = {10, 0, 2, 15};
@@ -106,42 +108,6 @@ static struct udp_socket udp_sockets[UDP_SOCKET_COUNT];
 static uint8_t arp_next;
 static uint16_t next_ephemeral_port = 49152;
 static const uint32_t dhcp_transaction = 0x534F5301U;
-
-static inline void outb(uint16_t port, uint8_t value)
-{
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline void outw(uint16_t port, uint16_t value)
-{
-    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline void outl(uint16_t port, uint32_t value)
-{
-    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port)
-{
-    uint8_t value;
-    __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
-static inline uint16_t inw(uint16_t port)
-{
-    uint16_t value;
-    __asm__ volatile ("inw %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
-static inline uint32_t inl(uint16_t port)
-{
-    uint32_t value;
-    __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
 
 static void memory_copy(void *destination, const void *source, size_t length)
 {
@@ -563,11 +529,25 @@ bool network_init(void)
         return false;
     }
     io_base = (uint16_t)(bar0 & ~3U);
+    if (device->interrupt_line >= 16) {
+        terminal_write("RTL8139 has no supported legacy IRQ.\n");
+        return false;
+    }
+    interrupt_line = device->interrupt_line;
 
     pci_enable_device(device, true, false, true);
     outb((uint16_t)(io_base + 0x52), 0);
     outb((uint16_t)(io_base + 0x37), 0x10);
-    while ((inb((uint16_t)(io_base + 0x37)) & 0x10) != 0) {
+    bool reset_complete = false;
+    for (uint32_t attempt = 0; attempt < 100000; ++attempt) {
+        if ((inb((uint16_t)(io_base + 0x37)) & 0x10) == 0) {
+            reset_complete = true;
+            break;
+        }
+    }
+    if (!reset_complete) {
+        terminal_write("RTL8139 reset timed out.\n");
+        return false;
     }
 
     for (uint8_t i = 0; i < 6; ++i) {
@@ -584,9 +564,12 @@ bool network_init(void)
     return true;
 }
 
-void network_poll(void)
+static bool network_poll(void)
 {
-    while ((inb((uint16_t)(io_base + 0x37)) & 1U) == 0) {
+    /* Bound one dispatch so corrupt hardware state cannot trap the CPU here. */
+    for (uint32_t budget = 0;
+         budget < 64 && (inb((uint16_t)(io_base + 0x37)) & 1U) == 0;
+         ++budget) {
         uint8_t *packet = rx_buffer + rx_offset;
         uint16_t status = *(volatile uint16_t *)packet;
         uint16_t length = *(volatile uint16_t *)(packet + 2);
@@ -594,7 +577,7 @@ void network_poll(void)
             outb((uint16_t)(io_base + 0x37), 0x04);
             rx_offset = 0;
             outl((uint16_t)(io_base + 0x30), (uint32_t)(uintptr_t)rx_buffer);
-            return;
+            return true;
         }
 
         handle_frame(packet + 4, (uint16_t)(length - 4));
@@ -602,14 +585,22 @@ void network_poll(void)
         rx_offset %= 8192;
         outw((uint16_t)(io_base + 0x38), (uint16_t)(rx_offset - 16));
     }
+    return (inb((uint16_t)(io_base + 0x37)) & 1U) != 0;
 }
 
-void network_interrupt(void)
+void network_interrupt(uint8_t irq)
 {
-    if (!network_ready) return;
+    if (!network_ready || irq != interrupt_line) return;
     uint16_t status = inw((uint16_t)(io_base + 0x3E));
-    if (status != 0) outw((uint16_t)(io_base + 0x3E), status);
-    network_poll();
+    bool drained = network_poll();
+    uint16_t acknowledged = drained ? status : (uint16_t)(status & ~1U);
+    if (acknowledged != 0)
+        outw((uint16_t)(io_base + 0x3E), acknowledged);
+}
+
+int network_irq(void)
+{
+    return network_ready ? interrupt_line : -1;
 }
 
 int udp_open(uint16_t local_port)

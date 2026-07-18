@@ -1,6 +1,8 @@
 #include "memory.h"
 
 #include "devices.h"
+#include "interrupts.h"
+#include "arch/x86/cpu.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -39,6 +41,7 @@ struct heap_block {
 extern uint8_t kernel_end;
 
 static uint8_t page_bitmap[BITMAP_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static uint8_t page_allocated[BITMAP_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint32_t page_directory[1024] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t kernel_heap[HEAP_SIZE] __attribute__((aligned(16)));
 static struct heap_block *heap_head;
@@ -68,20 +71,38 @@ static void page_mark_used(uint32_t page)
     }
 }
 
-static void page_mark_free(uint32_t page)
+static bool page_mark_free(uint32_t page)
 {
-    if (page >= PAGE_COUNT) return;
+    if (page >= PAGE_COUNT) return false;
     uint8_t mask = (uint8_t)(1U << (page & 7U));
     if ((page_bitmap[page >> 3] & mask) != 0) {
         page_bitmap[page >> 3] &= (uint8_t)~mask;
         ++free_pages;
+        return true;
     }
+    return false;
+}
+
+static bool page_is_allocated(uint32_t page)
+{
+    return page < PAGE_COUNT &&
+           (page_allocated[page >> 3] & (1U << (page & 7U))) != 0;
+}
+
+static void page_set_allocated(uint32_t page, bool allocated)
+{
+    uint8_t mask = (uint8_t)(1U << (page & 7U));
+    if (allocated) page_allocated[page >> 3] |= mask;
+    else page_allocated[page >> 3] &= (uint8_t)~mask;
 }
 
 static void reserve_range(uintptr_t start, uintptr_t end)
 {
+    if (end <= start) return;
     uint32_t first = (uint32_t)(start / PAGE_SIZE);
-    uint32_t last = (uint32_t)((end + PAGE_SIZE - 1) / PAGE_SIZE);
+    uint64_t rounded_end = (uint64_t)end + PAGE_SIZE - 1;
+    uint32_t last = rounded_end / PAGE_SIZE > PAGE_COUNT
+        ? PAGE_COUNT : (uint32_t)(rounded_end / PAGE_SIZE);
     for (uint32_t page = first; page < last; ++page) page_mark_used(page);
 }
 
@@ -90,16 +111,7 @@ static void paging_enable(void)
     /* Kernel and device identity mappings are supervisor-only. */
     for (uint32_t i = 0; i < 1024; ++i)
         page_directory[i] = (i << 22) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_LARGE;
-    uintptr_t directory = (uintptr_t)page_directory;
-    __asm__ volatile (
-        "mov %%cr4, %%eax\n"
-        "or $0x10, %%eax\n"
-        "mov %%eax, %%cr4\n"
-        "mov %0, %%cr3\n"
-        "mov %%cr0, %%eax\n"
-        "or $0x80000000, %%eax\n"
-        "mov %%eax, %%cr0\n"
-        : : "r"(directory) : "eax", "memory");
+    arch_enable_paging((uint32_t)(uintptr_t)page_directory);
 }
 
 static void heap_init(void)
@@ -111,29 +123,122 @@ static void heap_init(void)
     heap_head->previous = NULL;
 }
 
+static bool heap_failure_self_test(void)
+{
+    void *blocks[256];
+    size_t count = 0;
+    while (count < sizeof(blocks) / sizeof(blocks[0])) {
+        blocks[count] = kmalloc(PAGE_SIZE);
+        if (blocks[count] == NULL) break;
+        ++count;
+    }
+    bool exhausted = count != 0 && count < sizeof(blocks) / sizeof(blocks[0]) &&
+                     kmalloc(PAGE_SIZE) == NULL && kmalloc(SIZE_MAX) == NULL;
+    while (count != 0) kfree(blocks[--count]);
+    void *coalesced = kmalloc(HEAP_SIZE / 2);
+    bool reusable = coalesced != NULL;
+    if (coalesced != NULL) kfree((uint8_t *)coalesced + 8);
+    void *overlap = kmalloc(HEAP_SIZE / 2);
+    bool interior_rejected = overlap == NULL;
+    kfree(overlap);
+    kfree(coalesced);
+    return exhausted && reusable && interior_rejected;
+}
+
+static bool physical_allocator_self_test(void)
+{
+    uint32_t before = free_pages;
+    uint32_t unowned = PAGE_COUNT;
+    for (uint32_t page = 0; page < PAGE_COUNT; ++page) {
+        uint8_t mask = (uint8_t)(1U << (page & 7U));
+        if ((page_bitmap[page >> 3] & mask) == 0) {
+            unowned = page;
+            break;
+        }
+    }
+    if (unowned == PAGE_COUNT) return false;
+    physical_page_free((void *)(uintptr_t)(unowned * PAGE_SIZE));
+    if (free_pages != before) return false;
+    void *page = physical_page_alloc();
+    if (page == NULL || free_pages + 1 != before) return false;
+    physical_page_free(page);
+    if (free_pages != before) return false;
+    physical_page_free(page);
+    return free_pages == before;
+}
+
+static bool memory_map_valid(uint32_t address, uint32_t length)
+{
+    if (address == 0 || length < sizeof(struct memory_map_entry) ||
+        length > UINT32_MAX - address) return false;
+    uintptr_t cursor = address;
+    uintptr_t end = cursor + length;
+    while (cursor < end) {
+        size_t remaining = end - cursor;
+        if (remaining < sizeof(uint32_t)) return false;
+        const struct memory_map_entry *entry =
+            (const struct memory_map_entry *)cursor;
+        if (entry->size < sizeof(*entry) - sizeof(entry->size)) return false;
+        uint64_t step = (uint64_t)entry->size + sizeof(entry->size);
+        if (step > remaining) return false;
+        cursor += (uintptr_t)step;
+    }
+    return cursor == end;
+}
+
+static bool memory_map_validation_self_test(void)
+{
+    struct memory_map_entry entry = {
+        sizeof(entry) - sizeof(entry.size), 0x100000, 0x200000, 1
+    };
+    uint32_t address = (uint32_t)(uintptr_t)&entry;
+    if (!memory_map_valid(address, sizeof(entry))) return false;
+    entry.size = sizeof(entry) - sizeof(entry.size) - 1;
+    if (memory_map_valid(address, sizeof(entry))) return false;
+    entry.size = sizeof(entry) - sizeof(entry.size);
+    if (memory_map_valid(address, sizeof(entry) - 1)) return false;
+    if (memory_map_valid(UINT32_MAX - 3U, 8)) return false;
+    return true;
+}
+
 bool memory_init(uint32_t address)
 {
+    if (address == 0 || address > UINT32_MAX - sizeof(struct multiboot_memory_info)) {
+        serial_write("SplintOS: rejected invalid boot information address\r\n");
+        return false;
+    }
     const struct multiboot_memory_info *info =
         (const struct multiboot_memory_info *)(uintptr_t)address;
+    if (!memory_map_validation_self_test()) {
+        serial_write("SplintOS: boot memory-map validation self-test failed\r\n");
+        return false;
+    }
+    serial_write("SplintOS: checked boot memory-map fixtures online\r\n");
     if ((info->flags & (1U << 6)) == 0) {
         serial_write("SplintOS: bootloader supplied no memory map\r\n");
         return false;
     }
+    if (!memory_map_valid(info->mmap_addr, info->mmap_length)) {
+        serial_write("SplintOS: rejected malformed boot memory map\r\n");
+        return false;
+    }
 
     bytes_set(page_bitmap, 0xFF, sizeof(page_bitmap));
+    bytes_set(page_allocated, 0, sizeof(page_allocated));
     total_pages = 0;
     free_pages = 0;
     uintptr_t cursor = info->mmap_addr;
     uintptr_t map_end = cursor + info->mmap_length;
     while (cursor < map_end) {
         const struct memory_map_entry *entry = (const struct memory_map_entry *)cursor;
-        if (entry->type == 1) {
-            uint64_t end = entry->address + entry->length;
-            if (end > 0x100000000ULL) end = 0x100000000ULL;
+        if (entry->type == 1 && entry->address < 0x100000000ULL) {
+            uint64_t maximum = 0x100000000ULL - entry->address;
+            uint64_t end = entry->length > maximum
+                ? 0x100000000ULL : entry->address + entry->length;
             uint64_t start = (entry->address + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
             for (uint64_t physical = start; physical + PAGE_SIZE <= end; physical += PAGE_SIZE) {
-                page_mark_free((uint32_t)(physical / PAGE_SIZE));
-                ++total_pages;
+                if (page_mark_free((uint32_t)(physical / PAGE_SIZE)))
+                    ++total_pages;
             }
         }
         cursor += entry->size + sizeof(entry->size);
@@ -142,20 +247,32 @@ bool memory_init(uint32_t address)
     reserve_range(0, (uintptr_t)&kernel_end);
     reserve_range(address, address + sizeof(*info));
     reserve_range(info->mmap_addr, info->mmap_addr + info->mmap_length);
+    if (!physical_allocator_self_test()) {
+        serial_write("SplintOS: physical allocator ownership self-test failed\r\n");
+        return false;
+    }
+    serial_write("SplintOS: physical allocator ownership online\r\n");
     paging_enable();
     heap_init();
+    if (!heap_failure_self_test()) {
+        serial_write("SplintOS: kernel heap failure self-test failed\r\n");
+        return false;
+    }
+    serial_write("SplintOS: kernel heap exhaustion and reuse online\r\n");
     serial_write("SplintOS: physical allocator, paging and heap online\r\n");
     return true;
 }
 
 void *physical_page_alloc(void)
 {
+    KERNEL_ASSERT(free_pages <= total_pages, "physical page accounting");
     for (uint32_t byte = 0; byte < BITMAP_SIZE; ++byte) {
         if (page_bitmap[byte] == 0xFF) continue;
         for (uint8_t bit = 0; bit < 8; ++bit) {
             uint32_t page = byte * 8 + bit;
             if ((page_bitmap[byte] & (1U << bit)) == 0) {
                 page_mark_used(page);
+                page_set_allocated(page, true);
                 return (void *)(uintptr_t)(page * PAGE_SIZE);
             }
         }
@@ -167,12 +284,16 @@ void physical_page_free(void *pointer)
 {
     uintptr_t address = (uintptr_t)pointer;
     if ((address & (PAGE_SIZE - 1)) != 0 || address < (uintptr_t)&kernel_end) return;
-    page_mark_free((uint32_t)(address / PAGE_SIZE));
+    uint32_t page = (uint32_t)(address / PAGE_SIZE);
+    if (!page_is_allocated(page)) return;
+    page_set_allocated(page, false);
+    (void)page_mark_free(page);
+    KERNEL_ASSERT(free_pages <= total_pages, "physical page accounting");
 }
 
 void *kmalloc(size_t size)
 {
-    if (size == 0) return NULL;
+    if (size == 0 || size > SIZE_MAX - 7U) return NULL;
     size = (size + 7U) & ~7U;
     for (struct heap_block *block = heap_head; block != NULL; block = block->next) {
         if (!block->free || block->size < size) continue;
@@ -196,7 +317,9 @@ void kfree(void *pointer)
 {
     if (pointer == NULL || (uint8_t *)pointer < kernel_heap + sizeof(struct heap_block) ||
         (uint8_t *)pointer >= kernel_heap + HEAP_SIZE) return;
-    struct heap_block *block = (struct heap_block *)pointer - 1;
+    struct heap_block *block = heap_head;
+    while (block != NULL && block + 1 != pointer) block = block->next;
+    if (block == NULL || block->free) return;
     block->free = true;
     if (block->next != NULL && block->next->free) {
         block->size += sizeof(*block) + block->next->size;
@@ -219,7 +342,7 @@ uint32_t *address_space_kernel(void) { return page_directory; }
 void address_space_activate(uint32_t *directory)
 {
     if (directory == NULL) directory = page_directory;
-    __asm__ volatile ("mov %0, %%cr3" : : "r"(directory) : "memory");
+    arch_load_page_directory((uint32_t)(uintptr_t)directory);
 }
 
 uint32_t *address_space_create(void)
@@ -270,7 +393,7 @@ bool address_space_unmap_user(uint32_t *directory, uintptr_t virtual_address)
     uint32_t pte = table[table_index];
     if ((pte & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER)) return false;
     table[table_index] = 0;
-    __asm__ volatile ("invlpg (%0)" : : "r"(virtual_address) : "memory");
+    arch_invalidate_page((const void *)virtual_address);
     physical_page_free((void *)(uintptr_t)(pte & ~0xFFFU));
     bool empty = true;
     for (size_t i = 0; i < 1024; ++i)

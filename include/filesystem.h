@@ -20,11 +20,24 @@ enum vfs_node_type {
 
 struct vfs_directory_entry {
     char name[32];
-    enum vfs_node_type type;
-    size_t size;
-    uint16_t mode;
+    uint32_t type;
+    uint32_t size;
+    uint16_t mode, reserved;
     uint32_t owner;
 };
+
+struct vfs_timestamp_entry {
+    char name[32];
+    uint32_t type, size;
+    uint16_t mode, reserved;
+    uint32_t owner;
+    uint32_t birth_time, modification_time, change_time;
+};
+
+_Static_assert(sizeof(struct vfs_timestamp_entry) == 60,
+               "timestamp entry ABI changed");
+_Static_assert(sizeof(struct vfs_directory_entry) == 48,
+               "directory entry ABI changed");
 
 void filesystem_init(void);
 int vfs_mkdir(const char *path);
@@ -41,6 +54,7 @@ int vfs_unlink(const char *path);
 int vfs_rename(const char *old_path, const char *new_path);
 int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capacity);
 int vfs_stat(const char *path, struct vfs_directory_entry *entry);
+int vfs_stat_timestamps(const char *path, struct vfs_timestamp_entry *entry);
 int vfs_chmod(const char *path, uint16_t mode);
 
 #endif

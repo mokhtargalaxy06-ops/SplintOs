@@ -1,0 +1,15 @@
+#ifndef SPLINTOS_ERROR_H
+#define SPLINTOS_ERROR_H
+
+enum kernel_result {
+    KERNEL_OK = 0,
+    KERNEL_ERROR_INVALID = -1,
+    KERNEL_ERROR_IO = -2,
+    KERNEL_ERROR_BUSY = -3,
+    KERNEL_ERROR_NO_SPACE = -4,
+    KERNEL_ERROR_TIMEOUT = -5,
+    KERNEL_ERROR_UNSUPPORTED = -6,
+    KERNEL_ERROR_NOT_FOUND = -7,
+};
+
+#endif

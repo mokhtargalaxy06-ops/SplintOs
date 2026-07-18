@@ -6,6 +6,19 @@ SplintOS is a freestanding 32-bit x86 monolithic kernel loaded by GRUB
 Multiboot. Scheduling, memory, filesystems, drivers, networking, and the current
 desktop execute in Ring 0. ELF32 applications execute in isolated Ring 3
 address spaces and access services only through a syscall gate.
+The Makefile also owns a parallel freestanding x86_64 compiler profile. Its
+probe requires 64-bit pointers and emits an ELF64 x86-64 object; it does not yet
+constitute a bootable long-mode kernel.
+Architecture-owned `include/arch/x86/io.h` is the sole C definition point for
+x86 port input/output instructions. Interrupt, PCI/ACPI, PS/2/serial, RTL8139,
+and VirtIO modules consume that boundary instead of embedding assembly. Static
+checks reject port-I/O instructions reintroduced into subsystem C sources.
+CPU control primitives are likewise isolated in architecture-owned paths,
+including `include/arch/x86/cpu.h`:
+interrupt state, halt/relax, paging registers, TLB invalidation, fault address,
+task-register loading, and the software reschedule interrupt. Static checks
+reject inline assembly outside architecture paths, leaving subsystem C code
+free of instruction-level x86 implementations.
 
 ## Boot sequence
 
@@ -19,6 +32,52 @@ GRUB -> assembly entry -> kernel_main -> devices and serial
 Interrupts start only after their handlers and dependencies are ready. Serial
 diagnostics remain available through boot and panic paths.
 
+Kernel subsystem results use a small negative `kernel_result` vocabulary for
+invalid requests, I/O failure, busy state, capacity exhaustion, timeout,
+unsupported operations, and missing objects. The generic block layer is the
+first converted boundary; callers that only need success/failure remain valid,
+while recovery and diagnostics can preserve the specific cause.
+Legacy VirtIO maps unavailable state, invalid transfer arithmetic, device I/O
+status, unsupported requests, and exhausted completion polling to distinct
+results. Sector-count multiplication is checked before constructing descriptor
+byte lengths.
+Partition discovery preserves block-read failures, reports `NOT_FOUND` when no
+checked MBR entry exists, and returns success only after registering a bounded
+partition. Partition I/O rejects null and out-of-range requests as `INVALID`
+while forwarding exact cache and device failures unchanged.
+Diskfs and VFS flush paths preserve `NOT_FOUND`, `UNSUPPORTED`, `INVALID`, and
+lower-layer I/O or timeout results through the scheduler descriptor boundary.
+The version 1 Ring 3 wrapper deliberately normalizes every failure to its
+documented `-1`, so internal diagnostics improve without changing user ABI.
+
+Short scheduler critical sections save EFLAGS, disable maskable interrupts,
+and restore the caller's original interrupt-enable state. Code must not pair a
+raw `cli` with an unconditional `sti`: doing so breaks nesting and can enable
+interrupts inside an outer critical section. These helpers provide local
+uniprocessor exclusion only; future SMP support still requires spinlocks plus
+documented lock ordering.
+
+Shared state that can be reached from both task and interrupt context uses an
+IRQ-saving spinlock. Acquisition disables local interrupts before attempting
+the atomic lock; release publishes writes before restoring the saved EFLAGS.
+Locks are non-recursive, critical sections must remain bounded, and code must
+not sleep while holding one. The diagnostic log is the first protected user of
+this contract. Locks must be acquired in subsystem order and never from a lower
+layer by callback into a higher layer.
+
+PS/2 keyboard, PS/2 mouse, and COM1 receive state is owned by IRQ dispatch.
+The idle loop does not call the device receive routine, preventing reentrant
+updates to packet assembly and the console ring while interrupts are enabled.
+Keyboard and mouse consumers perform their snapshot-and-clear operations with
+local interrupts disabled, so an arriving IRQ cannot be erased or split across
+the returned state.
+The console character ring has IRQ-only producers. Both trusted recovery reads
+and scheduler readiness checks save/disable interrupts around index inspection
+and consumption. UDP queue mutation occurs only in IRQ or syscall context, and
+scheduler wait-state mutation occurs only with interrupts disabled. The boot
+log uses its IRQ-saving spinlock; these boundaries complete the current
+uniprocessor shared-state audit.
+
 ## Address spaces and privilege
 
 Kernel physical memory and devices are identity-mapped supervisor-only. Each
@@ -27,6 +86,50 @@ user process receives a separate page directory with explicit pages between
 transitions, and the scheduler switches both the interrupt frame and `CR3`.
 
 User faults terminate the offending task. Kernel faults enter the panic path.
+Kernel invariant assertions use the same serial/VGA panic path and may report
+without a synthetic interrupt frame. The scheduler asserts its selected slot
+and address space; the physical allocator asserts free-page accounting. An
+assertion is for impossible internal state, never ordinary user or device input.
+Panic output includes the interrupt vector, error, control state, general
+registers, page-fault address when applicable, and a bounded frame-pointer
+backtrace restricted to the linked kernel image. Kernel builds retain frame
+pointers so addresses can be resolved against `build/splintos.bin` in GDB.
+
+Before initializing the physical allocator, the Multiboot memory-map walker
+checks the map-address addition, minimum entry payload, per-entry step, and
+exact end boundary. Usable ranges saturate at the 4 GiB physical limit without
+overflowing their 64-bit base-plus-length calculation. Malformed maps fail
+initialization with a serial diagnostic rather than driving an out-of-bounds
+walker.
+The containing Multiboot information address must be nonzero and leave room for
+the fixed fields without crossing the 32-bit physical limit. Kernel and
+bootloader reservation ceilings use widened arithmetic, so page rounding near
+4 GiB cannot wrap a protected range to zero.
+Recovery and graphics parsing occur only after successful memory-map
+validation. Recovery scans at most 256 command-line bytes with checked pointer
+extent. Graphics requires a nonzero 32-bit framebuffer, at least 3,200 bytes of
+pitch, and a widened pitch-times-600 extent wholly below 4 GiB before drawing.
+Memory initialization is a boot dependency barrier. Failure emits serial and
+terminal diagnostics and returns to the assembly fail-stop loop before PCI,
+storage, networking, scheduling, or interrupts are initialized. No dependent
+subsystem can run against absent allocator or scheduler state.
+Kernel heap alignment rejects sizes that would overflow before rounding.
+RAMFS geometric growth also fails before a capacity doubling can wrap. The
+boot allocator fixture includes a `SIZE_MAX` request and requires a clean
+`NULL` result.
+`kfree` accepts only the exact payload address of a currently allocated block
+reachable from the heap list. Interior, stale-after-coalescing, out-of-range,
+and duplicate frees are ignored without interpreting caller-controlled bytes as
+allocator metadata. The boot fixture proves an interior free does not make the
+held half-heap allocation reusable.
+Physical pages have a separate allocator-ownership bitmap in addition to the
+used/free map. Allocation establishes provenance; free requires and clears it
+before returning the page. Reserved firmware, kernel, bootloader, and device
+pages therefore cannot be released through `physical_page_free`, and duplicate
+frees are idempotently rejected.
+Usable-page totals increase only when a memory-map page transitions from used
+to free. Overlapping Multiboot available ranges therefore cannot double-count
+physical capacity even though the format permits multiple records.
 
 ## ELF loading
 
@@ -82,6 +185,9 @@ User programs call interrupt `0x80`. The current ABI provides:
 35 udp_receive(fd, endpoint, data, capacity)
 36 network_config(configuration)
 37 wall_clock(clock)
+38 stat_timestamps(path, entry)
+39 getpgrp()
+40 setpgid(process, process_group)
 ```
 
 Pointers are checked against the caller's page tables. Strings and data are
@@ -91,6 +197,11 @@ unknown poll-event bits, an ambiguous half-range timer deadline, and a break
 below the heap base; every call must return an error while the process survives.
 Path metadata uses the same fixed-width name, type, size, mode, and owner
 record as directory listing and is staged in kernel memory before copy-out.
+Both kernel and userspace declare its scalar fields with explicit-width types;
+no persistent or copy-out record depends on the compiler's `size_t` width.
+The append-only timestamp query returns a separate, exact 60-byte record with
+32-bit creation, content-modification, and metadata-change epoch seconds. This
+preserves the original 48-byte `stat` ABI while making `SPLFS5` clocks visible.
 Directory creation inherits the VFS permission model. Removal rejects root,
 mount points, non-directories, and directories containing any child node.
 Permission changes accept only the low nine mode bits and require ownership or
@@ -108,9 +219,18 @@ installs another reference and safely replaces an existing destination.
 Seek is restricted to VFS file objects and to offsets no larger than the
 current file size. Because duplicated descriptors reference the same open-file
 object, they intentionally share one seek position.
+Every public VFS operation enters a nest-safe local preemption guard before it
+reads or mutates the global node and descriptor tables. This prevents the GUI
+or recovery kernel context from being timer-preempted midway through an
+operation and resumed after a Ring 3 syscall changed the same table. Internal
+helpers remain unlocked and are reachable only through these guarded entry
+points or during single-threaded boot initialization.
 Truncate requires a writable regular-file descriptor. Shrinking clamps every
 open VFS offset for the node; growth zero-fills new bytes. Disk-backed changes
 use the same checked `SPLFS4` metadata commit path.
+Writes reject `offset + count` overflow before disk limits, capacity growth,
+buffer addressing, or descriptor advancement. One validated end offset is used
+throughout the operation, preventing divergent arithmetic checks.
 
 Descriptors `0`, `1`, and `2` are reserved for standard streams.
 Descriptor `0` reads from the keyboard and serial queue. An empty read places
@@ -129,6 +249,11 @@ The wall-clock call is deliberately separate. It takes a stable, bounded CMOS
 RTC snapshot, supports BCD or binary and 12- or 24-hour hardware formats, and
 returns validated calendar fields. It is read-only and does not provide elapsed
 time guarantees.
+Heap-break growth is transactional. If physical-page allocation or page-table
+mapping fails after partial progress, every page added by that request is
+unmapped and the previous byte-accurate break remains authoritative. A failed
+`brk` therefore cannot silently consume address space behind the userspace
+allocator's unchanged view.
 Poll accepts at most eight checked descriptor records and a wrap-safe bounded
 timeout. Console input, VFS objects, serial output, pipe data/EOF, and pipe
 write capacity contribute readiness. A non-ready caller sleeps in `TASK_POLL`;
@@ -172,6 +297,26 @@ Each socket owns a four-datagram FIFO. Receive removes the oldest datagram;
 when full, new arrivals are dropped instead of overwriting unread data. A local
 send still reports its accepted byte count because UDP cannot promise receiver
 delivery; this matches the observable contract of hardware transmission.
+RTL8139 reset has a finite polling budget and reports initialization failure if
+the device never clears reset. Receive dispatch processes at most 64 frames per
+entry, preventing a stuck or malicious status register from monopolizing the
+CPU while still draining ordinary bursts.
+If that budget expires with unread frames, receive-OK remains unacknowledged.
+The level-triggered PCI line is therefore delivered again after PIC EOI; work
+is bounded per entry without stranding a backlog.
+Receive-ring consumption is private to the RTL8139 interrupt path. The idle
+loop never advances `rx_offset`, so foreground work cannot race an interrupt
+while parsing or acknowledging the same frame.
+The driver records the legacy IRQ line reported by PCI enumeration and ignores
+dispatches from every other line. Unsupported line values fail initialization
+instead of treating arbitrary PIC activity as network completion.
+Legacy PIC IRQ7 and IRQ15 are checked against the controller in-service
+register. Spurious IRQ7 receives no EOI; spurious IRQ15 acknowledges only the
+master cascade, matching the 8259A protocol and avoiding phantom dispatch.
+PIC initialization starts with every line masked, then enables only PIT,
+keyboard, cascade, COM1, PS/2 mouse, and the validated RTL8139 line when that
+driver initialized. Unsupported or absent devices therefore cannot create an
+unhandled interrupt storm.
 The Ring 3 networking library builds bounded DNS A queries and sends them to the
 DHCP-provided resolver. Its response parser checks transaction ID, response and
 error flags, every label or compression pointer boundary, question and answer
@@ -207,7 +352,7 @@ kernel conformance tests. Boot verifies that a failed cache writeback remains
 dirty, reports failure, and succeeds after fault injection is cleared.
 
 The partition layer accepts a narrow MBR subset after checking its signature,
-type, size, arithmetic, and device bounds. `SPLFS4` uses a versioned superblock,
+type, size, arithmetic, and device bounds. `SPLFS5` uses a versioned superblock,
 a fixed directory sector, a one-sector allocation bitmap, and up to eight
 dynamically placed contiguous file extents. Files are bounded to 4 KiB. Sector
 counts are derived from file size; checked first-fit allocation consults the
@@ -291,15 +436,23 @@ buffer and never exposes the ring or kernel pointers.
 The default GRUB entry starts the Ring 3 shell. A second entry passes the
 `recovery` Multiboot command line, skips normal ELF startup, and enables the
 trusted kernel console.
+That console alone provides `migrate-disk`, the explicit operation for converting
+a fully validated read-only SPLFS4 mount to SPLFS5 metadata.
+
+Process groups are kernel-owned scheduler metadata. The first user process in a
+kernel lineage becomes a group leader; descendants inherit that group. A process
+may move itself or a direct child into its own group or an existing same-identity
+group. Nonexistent groups, unrelated processes, and cross-identity changes fail.
+This establishes identifiers for later foreground-terminal and signal routing.
 
 ## Current gaps
 
 - No environment or independent background process reaper
-- No descriptor polling, signals, environment, or job control
+- No signals, environment, foreground-terminal selection, or complete job control
 - No shared memory or mapped-file support
 - VirtIO requests poll synchronously; interrupts and concurrent requests are absent
 - Only legacy/transitional VirtIO PCI is supported, not modern VirtIO capabilities
-- `SPLFS4` is flat, limited to eight entries, one contiguous extent per file,
+- `SPLFS5` is flat, limited to eight entries, one contiguous extent per file,
   and a bitmap covering at most 4,096 sectors
 - GUI and most services remain in Ring 0; the kernel shell is recovery-only
 - No TCP, TLS, HTTP, or general-purpose socket compatibility layer
@@ -307,3 +460,15 @@ trusted kernel console.
 
 The next architecture change is safer and more capable diskfs metadata. See
 [NEXT_STEP.md](../NEXT_STEP.md).
+# System-call ABI ownership
+
+The stable Ring 3 call numbers and global argument bounds live in
+`include/splint/abi.h`. Both the kernel dispatcher and the preprocessed
+userspace assembly wrappers include that file, preventing a wrapper and its
+handler from silently assigning different meanings to the same `int 0x80`
+number. Existing numbers are append-only within ABI version 1.
+
+Pointer-free records crossing the privilege boundary have compile-time size
+assertions on both sides. Pointer-bearing records are fixed to the 32-bit ABI;
+the kernel copies and validates their fields before use. Generated Makefile
+dependencies ensure a header-only ABI edit rebuilds every affected object.

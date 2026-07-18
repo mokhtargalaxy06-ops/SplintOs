@@ -67,6 +67,8 @@ void task_exit(void) __attribute__((noreturn));
 uint32_t task_current_id(void);
 uint32_t task_count(void);
 uint32_t task_current_uid(void);
+uint32_t task_current_process_group(void);
+int task_set_process_group(uint32_t process_id, uint32_t process_group);
 void task_set_current_uid(uint32_t uid);
 uint32_t *task_current_address_space(void);
 int task_descriptor_open(const char *path, uint32_t flags);

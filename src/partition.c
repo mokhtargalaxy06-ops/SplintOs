@@ -17,15 +17,20 @@ struct PACKED mbr_entry {
 static struct partition partitions[MAX_PARTITIONS];
 static size_t found_partitions;
 
-void partition_init(void)
+int partition_init(void)
 {
     found_partitions = 0;
+    int scan_result = KERNEL_ERROR_NOT_FOUND;
     for (size_t device_index = 0; device_index < block_device_count(); ++device_index) {
         struct block_device *device = block_device_get(device_index);
         if (device->sector_size != 512) continue;
         uint8_t sector[512];
-        if (block_cached_read(device, 0, sector) != 0 ||
-            sector[510] != 0x55 || sector[511] != 0xAA) continue;
+        int read_result = block_cached_read(device, 0, sector);
+        if (read_result != KERNEL_OK) {
+            scan_result = read_result;
+            continue;
+        }
+        if (sector[510] != 0x55 || sector[511] != 0xAA) continue;
         const struct mbr_entry *entries = (const struct mbr_entry *)(sector + 446);
         for (size_t i = 0; i < MBR_ENTRY_COUNT && found_partitions < MAX_PARTITIONS; ++i) {
             uint64_t first = entries[i].first_sector;
@@ -34,11 +39,13 @@ void partition_init(void)
                 count > device->sector_count - first) continue;
             partitions[found_partitions++] =
                 (struct partition){device, first, count, entries[i].type};
+            scan_result = KERNEL_OK;
         }
     }
     serial_write(found_partitions != 0
         ? "SplintOS: validated MBR partition discovered\r\n"
         : "SplintOS: no valid MBR partitions found\r\n");
+    return found_partitions != 0 ? KERNEL_OK : scan_result;
 }
 
 size_t partition_count(void) { return found_partitions; }
@@ -47,16 +54,18 @@ const struct partition *partition_get(size_t index)
 
 int partition_read(const struct partition *partition, uint64_t sector, void *buffer)
 {
-    if (partition == NULL || sector >= partition->sector_count) return -1;
+    if (partition == NULL || sector >= partition->sector_count)
+        return KERNEL_ERROR_INVALID;
     return block_cached_read(partition->device, partition->first_sector + sector, buffer);
 }
 
 int partition_write(const struct partition *partition, uint64_t sector,
                     const void *buffer)
 {
-    if (partition == NULL || sector >= partition->sector_count) return -1;
+    if (partition == NULL || sector >= partition->sector_count)
+        return KERNEL_ERROR_INVALID;
     return block_cached_write(partition->device, partition->first_sector + sector, buffer);
 }
 
 int partition_flush(const struct partition *partition)
-{ return partition == NULL ? -1 : block_cache_flush(partition->device); }
+{ return partition == NULL ? KERNEL_ERROR_INVALID : block_cache_flush(partition->device); }

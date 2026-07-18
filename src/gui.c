@@ -61,6 +61,8 @@ static void present(void)
 static const uint8_t font[][7] = {
     [' ' - 32]={0,0,0,0,0,0,0}, ['!' - 32]={4,4,4,4,4,0,4},
     ['.' - 32]={0,0,0,0,0,6,6}, [':' - 32]={0,6,6,0,6,6,0},
+    ['-' - 32]={0,0,0,31,0,0,0}, ['>' - 32]={16,8,4,2,4,8,16},
+    ['?' - 32]={14,17,1,2,4,0,4}, ['_' - 32]={0,0,0,0,0,0,31},
     ['/' - 32]={1,1,2,4,8,16,16}, ['0' - 32]={14,17,19,21,25,17,14},
     ['1' - 32]={4,12,4,4,4,4,14}, ['2' - 32]={14,17,1,2,4,8,31},
     ['3' - 32]={30,1,1,14,1,1,30}, ['4' - 32]={2,6,10,18,31,2,2},
@@ -80,6 +82,19 @@ static const uint8_t font[][7] = {
     ['V' - 32]={17,17,17,17,17,10,4}, ['W' - 32]={17,17,17,21,21,21,10},
     ['X' - 32]={17,17,10,4,10,17,17}, ['Y' - 32]={17,17,10,4,4,4,4},
     ['Z' - 32]={31,1,2,4,8,16,31},
+    ['a' - 32]={0,0,14,1,15,17,15}, ['b' - 32]={16,16,30,17,17,17,30},
+    ['c' - 32]={0,0,14,17,16,17,14}, ['d' - 32]={1,1,15,17,17,17,15},
+    ['e' - 32]={0,0,14,17,31,16,14}, ['f' - 32]={6,9,8,28,8,8,8},
+    ['g' - 32]={0,0,15,17,15,1,14}, ['h' - 32]={16,16,30,17,17,17,17},
+    ['i' - 32]={4,0,12,4,4,4,14}, ['j' - 32]={2,0,6,2,2,18,12},
+    ['k' - 32]={16,16,18,20,24,20,18}, ['l' - 32]={12,4,4,4,4,4,14},
+    ['m' - 32]={0,0,26,21,21,21,21}, ['n' - 32]={0,0,30,17,17,17,17},
+    ['o' - 32]={0,0,14,17,17,17,14}, ['p' - 32]={0,0,30,17,30,16,16},
+    ['q' - 32]={0,0,15,17,15,1,1}, ['r' - 32]={0,0,22,25,16,16,16},
+    ['s' - 32]={0,0,15,16,14,1,30}, ['t' - 32]={8,8,28,8,8,9,6},
+    ['u' - 32]={0,0,17,17,17,19,13}, ['v' - 32]={0,0,17,17,17,10,4},
+    ['w' - 32]={0,0,17,17,21,21,10}, ['x' - 32]={0,0,17,10,4,10,17},
+    ['y' - 32]={0,0,17,17,15,1,14}, ['z' - 32]={0,0,31,2,4,8,31},
 };
 
 static void rectangle(int x, int y, int w, int h, uint32_t color)
@@ -93,8 +108,7 @@ static void rectangle(int x, int y, int w, int h, uint32_t color)
 
 static void character(int x, int y, char c, uint32_t color, int scale)
 {
-    if (c >= 'a' && c <= 'z') c -= 32;
-    if (c < 32 || c > 'Z') c = ' ';
+    if (c < 32 || c > 'z') c = ' ';
     for (int row = 0; row < 7; ++row)
         for (int col = 0; col < 5; ++col)
             if (font[(unsigned)c - 32][row] & (1U << (4 - col)))
@@ -136,9 +150,9 @@ static void file_path_parent(void)
 static void button(int index, int x, const char *label)
 {
     uint32_t fill = selected == index ? 0x2563EB : 0x25334A;
-    rectangle(x, 490, 170, 52, selected == index ? 0x60A5FA : 0x334155);
-    rectangle(x + 2, 492, 166, 48, fill);
-    text(x + 20, 507, label, 0xFFFFFF, 2);
+    rectangle(x, 490, 160, 52, selected == index ? 0x60A5FA : 0x334155);
+    rectangle(x + 2, 492, 156, 48, fill);
+    text(x + 14, 507, label, 0xFFFFFF, 2);
 }
 
 static void window_frame(const char *title)
@@ -150,6 +164,54 @@ static void window_frame(const char *title)
     rectangle(625, 136, 20, 20, 0xEF4444);
     text(631, 141, "X", 0xFFFFFF, 1);
     text(158, 440, "PRESS ENTER TO CLOSE", 0x64748B, 1);
+}
+
+static void draw_terminal(void)
+{
+    enum { CAPACITY = 2048, ROWS = 22, COLUMNS = 76 };
+    char log[CAPACITY];
+    size_t count = boot_log_read(log, sizeof(log));
+    size_t start = count;
+    unsigned lines = 0;
+    while (start != 0 && lines <= ROWS) {
+        --start;
+        if (log[start] == '\n') ++lines;
+    }
+    if (start != 0) ++start;
+
+    int x = 158, y = 180;
+    unsigned column = 0;
+    for (size_t i = start; i < count && y < 420; ++i) {
+        char value = log[i];
+        if (value == '\r') continue;
+        if (value == '\n') {
+            column = 0; x = 158; y += 10;
+            continue;
+        }
+        if (column >= COLUMNS) continue;
+        char glyph[2] = { value, '\0' };
+        text(x, y, glyph, 0xD1FAE5, 1);
+        x += 6;
+        ++column;
+    }
+    rectangle(150, 432, 500, 28, 0x17243A);
+    text(158, 440, "TYPE COMMANDS  LEFT CLOSE", 0x64748B, 1);
+}
+
+static bool terminal_log_changed(void)
+{
+    static char previous[256];
+    static size_t previous_count;
+    char current[sizeof(previous)];
+    size_t count = boot_log_read(current, sizeof(current));
+    bool changed = count != previous_count;
+    for (size_t i = 0; i < count && !changed; ++i)
+        if (current[i] != previous[i]) changed = true;
+    if (changed) {
+        for (size_t i = 0; i < count; ++i) previous[i] = current[i];
+        previous_count = count;
+    }
+    return changed;
 }
 
 static void draw_window(void)
@@ -183,6 +245,9 @@ static void draw_window(void)
             y += 32;
         }
         text(165, 413, "UP/DOWN SELECT  ENTER OPEN  LEFT BACK", 0x94A3B8, 1);
+    } else if (active_window == 3) {
+        window_frame("TERMINAL");
+        draw_terminal();
     } else {
         window_frame("ABOUT SPLINTOS");
         text(165, 210, "EXPERIMENTAL X86 OPERATING SYSTEM", 0xF8FAFC, 2);
@@ -218,9 +283,10 @@ static void draw(void)
     text(82, 389, "CONTROL", 0x94A3B8, 2);
     text(250, 389, "ARROWS AND ENTER", 0xF8FAFC, 2);
 
-    button(0, 54, "NETWORK");
-    button(1, 315, "FILES");
-    button(2, 576, "ABOUT");
+    button(0, 25, "NETWORK");
+    button(1, 220, "FILES");
+    button(2, 415, "TERMINAL");
+    button(3, 610, "ABOUT");
     text(54, 566, "USE LEFT/RIGHT TO SELECT", 0x64748B, 1);
 
     draw_window();
@@ -238,7 +304,13 @@ bool gui_init(uint32_t address)
     const struct multiboot_info *info = (const struct multiboot_info *)(uintptr_t)address;
     if ((info->flags & (1U << 12)) == 0 || info->framebuffer_type != 1 ||
         info->framebuffer_bpp != 32 || info->framebuffer_addr > 0xFFFFFFFFULL ||
-        info->framebuffer_width < 800 || info->framebuffer_height < 600) return false;
+        info->framebuffer_addr == 0 || info->framebuffer_width < 800 ||
+        info->framebuffer_height < 600 || info->framebuffer_pitch < 800 * 4)
+        return false;
+    uint64_t framebuffer_end = info->framebuffer_addr +
+        (uint64_t)info->framebuffer_pitch * 600U;
+    if (framebuffer_end > 0x100000000ULL ||
+        framebuffer_end < info->framebuffer_addr) return false;
     framebuffer = (uint32_t *)(uintptr_t)(uint32_t)info->framebuffer_addr;
     width = 800;
     height = 600;
@@ -262,10 +334,10 @@ void gui_poll(void)
     bool redraw = false;
     enum input_key key = keyboard_take_key();
     if (key == KEY_LEFT && active_window == 0) {
-        selected = selected == 0 ? 2 : (uint8_t)(selected - 1);
+        selected = selected == 0 ? 3 : (uint8_t)(selected - 1);
         invalidate(50, 485, 700, 62); redraw = true;
     } else if ((key == KEY_RIGHT || key == KEY_TAB) && active_window == 0) {
-        selected = (uint8_t)((selected + 1) % 3);
+        selected = (uint8_t)((selected + 1) % 4);
         invalidate(50, 485, 700, 62); redraw = true;
     } else if ((key == KEY_UP || key == KEY_DOWN) && active_window == 2) {
         struct vfs_directory_entry entries[8];
@@ -282,6 +354,9 @@ void gui_poll(void)
         file_path_parent();
         file_selected = 0;
         invalidate(145, 170, 500, 270); redraw = true;
+    } else if (key == KEY_LEFT && active_window == 3) {
+        active_window = 0;
+        invalidate(125, 110, 550, 370); redraw = true;
     } else if (key == KEY_ENTER) {
         if (active_window == 2) {
             struct vfs_directory_entry entries[8];
@@ -292,7 +367,7 @@ void gui_poll(void)
                 file_selected = 0;
                 invalidate(145, 170, 500, 270); redraw = true;
             }
-        } else {
+        } else if (active_window != 3) {
             active_window = active_window == 0 ? (uint8_t)(selected + 1) : 0;
         }
         invalidate(125, 110, 550, 370); redraw = true;
@@ -307,19 +382,24 @@ void gui_poll(void)
         if (cursor_y < 0) cursor_y = 0;
         if (cursor_x > (int)width - 16) cursor_x = (int)width - 16;
         if (cursor_y > (int)height - 16) cursor_y = (int)height - 16;
-        if (state.left && cursor_y >= 490 && cursor_y <= 542) {
-            if (cursor_x >= 54 && cursor_x <= 224) { selected = 0; active_window = 1; }
-            else if (cursor_x >= 315 && cursor_x <= 485) { selected = 1; active_window = 2; }
-            else if (cursor_x >= 576 && cursor_x <= 746) { selected = 2; active_window = 3; }
+        if (state.left_pressed && cursor_y >= 490 && cursor_y <= 542) {
+            if (cursor_x >= 25 && cursor_x <= 185) { selected = 0; active_window = 1; }
+            else if (cursor_x >= 220 && cursor_x <= 380) { selected = 1; active_window = 2; }
+            else if (cursor_x >= 415 && cursor_x <= 575) { selected = 2; active_window = 3; }
+            else if (cursor_x >= 610 && cursor_x <= 770) { selected = 3; active_window = 4; }
             invalidate(125, 110, 550, 440);
         }
-        if (state.left && active_window != 0 && cursor_x >= 625 && cursor_x <= 645 &&
+        if (state.left_pressed && active_window != 0 && cursor_x >= 625 && cursor_x <= 645 &&
             cursor_y >= 136 && cursor_y <= 156) {
             active_window = 0;
             invalidate(125, 110, 550, 370);
         }
         invalidate(old_x, old_y, 16, 16);
         invalidate(cursor_x, cursor_y, 16, 16);
+        redraw = true;
+    }
+    if (active_window == 3 && terminal_log_changed()) {
+        invalidate(145, 170, 500, 280);
         redraw = true;
     }
     if (redraw) draw();

@@ -1,4 +1,6 @@
 #include "interrupts.h"
+#include "arch/x86/io.h"
+#include "arch/x86/cpu.h"
 
 #include "devices.h"
 #include "kernel.h"
@@ -74,9 +76,15 @@ static const char *const exception_names[32] = {
     "VMM communication", "Security exception", "Reserved",
 };
 
-static inline void outb(uint16_t port, uint8_t value)
+static bool pic_spurious(uint32_t irq)
 {
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+    if (irq != 7 && irq != 15) return false;
+    uint16_t command = irq == 7 ? 0x20 : 0xA0;
+    outb(command, 0x0B); /* Read the in-service register. */
+    bool spurious = (inb(command) & 0x80U) == 0;
+    if (spurious && irq == 15)
+        outb(0x20, 0x20); /* Cascade IRQ2 was real; only master gets EOI. */
+    return spurious;
 }
 
 static void serial_hex(uint32_t value)
@@ -113,9 +121,14 @@ static void pic_remap(void)
     outb(0x21, 0x20); outb(0xA1, 0x28);
     outb(0x21, 0x04); outb(0xA1, 0x02);
     outb(0x21, 0x01); outb(0xA1, 0x01);
-    /* Enable legacy IRQ lines; individual drivers acknowledge their devices. */
-    outb(0x21, 0x00);
-    outb(0xA1, 0x00);
+    uint16_t mask = 0xFFFFU;
+    mask &= (uint16_t)~((1U << 0) | (1U << 1) | (1U << 2) |
+                       (1U << 4) | (1U << 12));
+    int network_line = network_irq();
+    if (network_line >= 0 && network_line < 16)
+        mask &= (uint16_t)~(1U << network_line);
+    outb(0x21, (uint8_t)mask);
+    outb(0xA1, (uint8_t)(mask >> 8));
 }
 
 static void pit_init(void)
@@ -128,7 +141,7 @@ static void pit_init(void)
 
 void interrupts_init(void)
 {
-    __asm__ volatile ("cli");
+    arch_interrupts_disable();
     gdt[0] = 0;
     gdt[1] = gdt_entry(0, 0xFFFFF, 0x9A, 0x0C);
     gdt[2] = gdt_entry(0, 0xFFFFF, 0x92, 0x0C);
@@ -140,7 +153,7 @@ void interrupts_init(void)
     gdt[5] = gdt_entry((uint32_t)(uintptr_t)&tss, sizeof(tss) - 1, 0x89, 0x00);
     struct descriptor_pointer gdtr = {sizeof(gdt) - 1, (uint32_t)(uintptr_t)gdt};
     gdt_flush(&gdtr);
-    __asm__ volatile ("ltr %%ax" : : "a"(0x28));
+    arch_load_task_register(0x28);
 
     for (uint16_t i = 0; i < 256; ++i) idt[i] = (struct idt_entry){0};
     for (uint8_t i = 0; i < 48; ++i) set_gate(i, stubs[i], i == 3 ? 0xEE : 0x8E);
@@ -150,7 +163,7 @@ void interrupts_init(void)
     pic_remap();
     pit_init();
     serial_write("SplintOS: GDT, TSS, IDT, PIC and PIT initialized\r\n");
-    __asm__ volatile ("sti");
+    arch_interrupts_enable();
 }
 
 struct interrupt_frame *interrupt_dispatch(struct interrupt_frame *frame)
@@ -164,9 +177,10 @@ struct interrupt_frame *interrupt_dispatch(struct interrupt_frame *frame)
         kernel_panic(exception_names[frame->vector], frame);
     }
     uint32_t irq = frame->vector - 32;
+    if (pic_spurious(irq)) return frame;
     if (irq == 0) ++ticks;
     else if (irq == 1 || irq == 4 || irq == 12) devices_poll();
-    else network_interrupt();
+    else network_interrupt((uint8_t)irq);
     if (irq >= 8) outb(0xA0, 0x20);
     outb(0x20, 0x20);
     return irq == 0 ? scheduler_tick(frame) : frame;
@@ -184,16 +198,46 @@ uint32_t timer_ticks(void)
 
 void kernel_panic(const char *message, const struct interrupt_frame *frame)
 {
-    __asm__ volatile ("cli");
+    extern uint8_t kernel_start[], kernel_end[];
+    arch_interrupts_disable();
     serial_write("\r\nKERNEL PANIC: ");
     serial_write(message);
-    serial_write("\r\nEIP=");
-    serial_hex(frame->eip);
-    serial_write(" ERROR=");
-    serial_hex(frame->error_code);
-    if (frame->vector == 14) {
-        uint32_t fault_address;
-        __asm__ volatile ("mov %%cr2, %0" : "=r"(fault_address));
+    if (frame != NULL) {
+        serial_write("\r\nEIP=");
+        serial_hex(frame->eip);
+        serial_write(" CS=");
+        serial_hex(frame->cs);
+        serial_write(" EFLAGS=");
+        serial_hex(frame->eflags);
+        serial_write(" VECTOR=");
+        serial_hex(frame->vector);
+        serial_write(" ERROR=");
+        serial_hex(frame->error_code);
+        serial_write("\r\nEAX="); serial_hex(frame->eax);
+        serial_write(" EBX="); serial_hex(frame->ebx);
+        serial_write(" ECX="); serial_hex(frame->ecx);
+        serial_write(" EDX="); serial_hex(frame->edx);
+        serial_write("\r\nESI="); serial_hex(frame->esi);
+        serial_write(" EDI="); serial_hex(frame->edi);
+        serial_write(" EBP="); serial_hex(frame->ebp);
+        serial_write(" ESP="); serial_hex(frame->esp);
+    }
+    uintptr_t frame_pointer = frame != NULL ? frame->ebp : arch_frame_pointer();
+    serial_write("\r\nBACKTRACE:");
+    for (size_t depth = 0; depth < 12; ++depth) {
+        if ((frame_pointer & (sizeof(uintptr_t) - 1U)) != 0 ||
+            frame_pointer < (uintptr_t)kernel_start ||
+            frame_pointer > (uintptr_t)kernel_end - 2U * sizeof(uintptr_t)) break;
+        const uintptr_t *record = (const uintptr_t *)frame_pointer;
+        uintptr_t next = record[0];
+        uintptr_t return_address = record[1];
+        serial_write(" ");
+        serial_hex((uint32_t)return_address);
+        if (next <= frame_pointer) break;
+        frame_pointer = next;
+    }
+    if (frame != NULL && frame->vector == 14) {
+        uint32_t fault_address = arch_fault_address();
         serial_write(" CR2=");
         serial_hex(fault_address);
     }
@@ -201,5 +245,5 @@ void kernel_panic(const char *message, const struct interrupt_frame *frame)
     terminal_write("\nKERNEL PANIC: ");
     terminal_write(message);
     terminal_write("\nCPU halted.\n");
-    for (;;) __asm__ volatile ("hlt");
+    for (;;) arch_cpu_halt();
 }

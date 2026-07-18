@@ -13,7 +13,7 @@ struct partition {
     uint8_t type;
 };
 
-void partition_init(void);
+int partition_init(void);
 size_t partition_count(void);
 const struct partition *partition_get(size_t index);
 int partition_read(const struct partition *partition, uint64_t sector, void *buffer);

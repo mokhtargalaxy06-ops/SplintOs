@@ -16,10 +16,17 @@ if [ "$mode" = "formatted" ] || [ "$mode" = "overlap" ] ||
    [ "$mode" = "out-of-range" ] || [ "$mode" = "checksum" ] ||
    [ "$mode" = "bitmap" ] || [ "$mode" = "dirty" ] ||
    [ "$mode" = "dirty-directory" ] || [ "$mode" = "dirty-bitmap" ]; then
-    # SPLFS4 geometry, allocation-bitmap feature, clean state, and checksums.
-    printf 'SPLFS4\000\000\004\000\000\000\010\000\000\000\010\000\000\000\001\000\000\000\002\000\000\000\003\000\000\000\001\000\000\000\000\000\000\000\305\005\167\115\322\200\223\065' |
+    # SPLFS5 geometry, allocation-bitmap feature, clean state, and checksums.
+    printf 'SPLFS5\000\000\005\000\000\000\010\000\000\000\010\000\000\000\001\000\000\000\002\000\000\000\003\000\000\000\001\000\000\000\000\000\000\000\305\005\167\115\322\200\223\065' |
         dd of="$image" bs=1 seek=4096 conv=notrunc status=none
     # Sectors 0..2 and all bits beyond the 128-sector partition are reserved.
+    printf '\007' | dd of="$image" bs=1 seek=5120 conv=notrunc status=none
+    dd if=/dev/zero bs=1 count=496 status=none | tr '\000' '\377' |
+        dd of="$image" bs=1 seek=5136 conv=notrunc status=none
+elif [ "$mode" = "legacy" ]; then
+    # Empty, clean SPLFS4 volume with the same geometry and bitmap contract.
+    printf 'SPLFS4\000\000\004\000\000\000\010\000\000\000\010\000\000\000\001\000\000\000\002\000\000\000\003\000\000\000\001\000\000\000\000\000\000\000\305\005\167\115\322\200\223\065' |
+        dd of="$image" bs=1 seek=4096 conv=notrunc status=none
     printf '\007' | dd of="$image" bs=1 seek=5120 conv=notrunc status=none
     dd if=/dev/zero bs=1 count=496 status=none | tr '\000' '\377' |
         dd of="$image" bs=1 seek=5136 conv=notrunc status=none
@@ -28,15 +35,14 @@ elif [ "$mode" != "unknown" ]; then
     exit 1
 fi
 
-# Directory sector starts at absolute LBA 9. Entries are 44 bytes:
-# name[32], size, first sector, sector count.
+# Directory sector starts at absolute LBA 9. SPLFS5 entries are 56 bytes.
 if [ "$mode" = "overlap" ]; then
     printf 'alpha' | dd of="$image" bs=1 seek=4608 conv=notrunc status=none
     printf '\000\002\000\000\002\000\000\000\001\000\000\000' |
         dd of="$image" bs=1 seek=4640 conv=notrunc status=none
-    printf 'beta' | dd of="$image" bs=1 seek=4652 conv=notrunc status=none
+    printf 'beta' | dd of="$image" bs=1 seek=4664 conv=notrunc status=none
     printf '\000\002\000\000\002\000\000\000\001\000\000\000' |
-        dd of="$image" bs=1 seek=4684 conv=notrunc status=none
+        dd of="$image" bs=1 seek=4696 conv=notrunc status=none
 elif [ "$mode" = "out-of-range" ]; then
     printf 'escape' | dd of="$image" bs=1 seek=4608 conv=notrunc status=none
     printf '\000\002\000\000\200\000\000\000\001\000\000\000' |

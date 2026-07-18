@@ -1,6 +1,7 @@
 #include "applications.h"
 
 #include "devices.h"
+#include "diskfs.h"
 #include "filesystem.h"
 #include "interrupts.h"
 #include "memory.h"
@@ -166,6 +167,17 @@ static void command_whoami(const char *arguments)
     print_number(task_current_uid()); print("\r\n");
 }
 
+static void command_migrate_disk(const char *arguments)
+{
+    if (*arguments != '\0') {
+        print("usage: migrate-disk\r\n"); return;
+    }
+    if (diskfs_migrate_legacy() == 0)
+        print("SPLFS4 migrated to SPLFS5\r\n");
+    else
+        print("migrate-disk: no validated read-only SPLFS4 mount\r\n");
+}
+
 static const struct command commands[] = {
     {"help", "show available commands", command_help},
     {"echo", "print text", command_echo},
@@ -178,6 +190,7 @@ static const struct command commands[] = {
     {"net", "show network configuration", command_net},
     {"devices", "list ACPI and PCI hardware", command_devices},
     {"whoami", "show the task security identity", command_whoami},
+    {"migrate-disk", "explicitly migrate validated SPLFS4 metadata", command_migrate_disk},
 };
 
 static void command_help(const char *arguments)

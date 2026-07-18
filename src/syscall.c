@@ -1,59 +1,65 @@
 #include "syscall.h"
 
 #include "devices.h"
+#include "error.h"
 #include "interrupts.h"
 #include "memory.h"
 #include "scheduler.h"
 #include "filesystem.h"
 #include "elf.h"
 #include "network.h"
+#include "splint/abi.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 enum {
-    SYSCALL_WRITE = 1,
-    SYSCALL_EXIT = 2,
-    SYSCALL_OPEN = 3,
-    SYSCALL_READ = 4,
-    SYSCALL_CLOSE = 5,
-    SYSCALL_GETPID = 6,
-    SYSCALL_SPAWN = 7,
-    SYSCALL_WAIT = 8,
-    SYSCALL_DUP2 = 9,
-    SYSCALL_PIPE = 10,
-    SYSCALL_SPAWN_ACTIONS = 11,
-    SYSCALL_LIST = 12,
-    SYSCALL_MEMORY_INFO = 13,
-    SYSCALL_UPTIME = 14,
-    SYSCALL_PROCESS_INFO = 15,
-    SYSCALL_BRK = 16,
-    SYSCALL_YIELD = 17,
-    SYSCALL_SLEEP = 18,
-    SYSCALL_SEEK = 19,
-    SYSCALL_FSYNC = 20,
-    SYSCALL_UNLINK = 21,
-    SYSCALL_RENAME = 22,
-    SYSCALL_LOG_READ = 23,
-    SYSCALL_STAT = 24,
-    SYSCALL_UNAME = 25,
-    SYSCALL_TRUNCATE = 26,
-    SYSCALL_MKDIR = 27,
-    SYSCALL_RMDIR = 28,
-    SYSCALL_CHMOD = 29,
-    SYSCALL_GETUID = 30,
-    SYSCALL_POLL = 31,
-    SYSCALL_CLOCK_GET = 32,
-    SYSCALL_UDP_OPEN = 33,
-    SYSCALL_UDP_SEND = 34,
-    SYSCALL_UDP_RECEIVE = 35,
-    SYSCALL_NETWORK_CONFIG = 36,
-    SYSCALL_WALL_CLOCK = 37,
-    SYSCALL_MAX_WRITE = 4096,
-    SYSCALL_MAX_PATH = 127,
-    SYSCALL_MAX_ARGUMENTS = 8,
-    SYSCALL_MAX_ACTIONS = 8,
+    SYSCALL_WRITE = SPLINT_SYS_WRITE,
+    SYSCALL_EXIT = SPLINT_SYS_EXIT,
+    SYSCALL_OPEN = SPLINT_SYS_OPEN,
+    SYSCALL_READ = SPLINT_SYS_READ,
+    SYSCALL_CLOSE = SPLINT_SYS_CLOSE,
+    SYSCALL_GETPID = SPLINT_SYS_GETPID,
+    SYSCALL_SPAWN = SPLINT_SYS_SPAWN,
+    SYSCALL_WAIT = SPLINT_SYS_WAIT,
+    SYSCALL_DUP2 = SPLINT_SYS_DUP2,
+    SYSCALL_PIPE = SPLINT_SYS_PIPE,
+    SYSCALL_SPAWN_ACTIONS = SPLINT_SYS_SPAWN_ACTIONS,
+    SYSCALL_LIST = SPLINT_SYS_LIST,
+    SYSCALL_MEMORY_INFO = SPLINT_SYS_MEMORY_INFO,
+    SYSCALL_UPTIME = SPLINT_SYS_UPTIME,
+    SYSCALL_PROCESS_INFO = SPLINT_SYS_PROCESS_INFO,
+    SYSCALL_BRK = SPLINT_SYS_BRK,
+    SYSCALL_YIELD = SPLINT_SYS_YIELD,
+    SYSCALL_SLEEP = SPLINT_SYS_SLEEP,
+    SYSCALL_SEEK = SPLINT_SYS_SEEK,
+    SYSCALL_FSYNC = SPLINT_SYS_FSYNC,
+    SYSCALL_UNLINK = SPLINT_SYS_UNLINK,
+    SYSCALL_RENAME = SPLINT_SYS_RENAME,
+    SYSCALL_LOG_READ = SPLINT_SYS_LOG_READ,
+    SYSCALL_STAT = SPLINT_SYS_STAT,
+    SYSCALL_UNAME = SPLINT_SYS_UNAME,
+    SYSCALL_TRUNCATE = SPLINT_SYS_TRUNCATE,
+    SYSCALL_MKDIR = SPLINT_SYS_MKDIR,
+    SYSCALL_RMDIR = SPLINT_SYS_RMDIR,
+    SYSCALL_CHMOD = SPLINT_SYS_CHMOD,
+    SYSCALL_GETUID = SPLINT_SYS_GETUID,
+    SYSCALL_POLL = SPLINT_SYS_POLL,
+    SYSCALL_CLOCK_GET = SPLINT_SYS_CLOCK_GET,
+    SYSCALL_UDP_OPEN = SPLINT_SYS_UDP_OPEN,
+    SYSCALL_UDP_SEND = SPLINT_SYS_UDP_SEND,
+    SYSCALL_UDP_RECEIVE = SPLINT_SYS_UDP_RECEIVE,
+    SYSCALL_NETWORK_CONFIG = SPLINT_SYS_NETWORK_CONFIG,
+    SYSCALL_WALL_CLOCK = SPLINT_SYS_WALL_CLOCK,
+    SYSCALL_STAT_TIMESTAMPS = SPLINT_SYS_STAT_TIMESTAMPS,
+    SYSCALL_GETPGRP = SPLINT_SYS_GETPGRP,
+    SYSCALL_SETPGID = SPLINT_SYS_SETPGID,
 };
+
+#define SYSCALL_MAX_WRITE SPLINT_ABI_MAX_IO
+#define SYSCALL_MAX_PATH SPLINT_ABI_MAX_PATH
+#define SYSCALL_MAX_ARGUMENTS SPLINT_ABI_MAX_ARGUMENTS
+#define SYSCALL_MAX_ACTIONS SPLINT_ABI_MAX_ACTIONS
 
 struct syscall_memory_info { uint32_t total_kib, free_kib; };
 struct syscall_process_info { uint32_t process_count, current_pid; };
@@ -64,6 +70,15 @@ struct syscall_udp_endpoint { uint8_t address[4]; uint16_t port, reserved; };
 struct syscall_network_config { uint8_t address[4], subnet[4], gateway[4], dns[4]; };
 struct syscall_wall_clock { uint16_t year; uint8_t month, day, hour, minute, second; };
 
+_Static_assert(sizeof(struct syscall_memory_info) == 8, "memory info ABI changed");
+_Static_assert(sizeof(struct syscall_process_info) == 8, "process info ABI changed");
+_Static_assert(sizeof(struct syscall_uname) == 48, "uname ABI changed");
+_Static_assert(sizeof(struct syscall_poll_entry) == 12, "poll entry ABI changed");
+_Static_assert(sizeof(struct syscall_clock) == 8, "clock ABI changed");
+_Static_assert(sizeof(struct syscall_udp_endpoint) == 8, "UDP endpoint ABI changed");
+_Static_assert(sizeof(struct syscall_network_config) == 16, "network config ABI changed");
+_Static_assert(sizeof(struct syscall_wall_clock) == 8, "wall clock ABI changed");
+
 struct user_spawn_request {
     uintptr_t path;
     uintptr_t arguments;
@@ -71,6 +86,8 @@ struct user_spawn_request {
     uintptr_t actions;
     uint32_t action_count;
 };
+
+_Static_assert(sizeof(struct user_spawn_request) == 20, "spawn request ABI changed");
 
 static bool copy_user_string(char *destination, size_t capacity, uintptr_t source)
 {
@@ -348,7 +365,8 @@ struct interrupt_frame *syscall_dispatch(struct interrupt_frame *frame)
         return frame;
     }
     if (frame->eax == SYSCALL_FSYNC) {
-        frame->eax = (uint32_t)task_descriptor_fsync((int)frame->ebx);
+        int result = task_descriptor_fsync((int)frame->ebx);
+        frame->eax = result == KERNEL_OK ? 0U : (uint32_t)-1;
         return frame;
     }
     if (frame->eax == SYSCALL_UNLINK) {
@@ -396,6 +414,28 @@ struct interrupt_frame *syscall_dispatch(struct interrupt_frame *frame)
         if (result == 0)
             *(struct vfs_directory_entry *)(uintptr_t)frame->ecx = entry;
         frame->eax = (uint32_t)result;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_STAT_TIMESTAMPS) {
+        char path[SYSCALL_MAX_PATH + 1];
+        if (!copy_user_string(path, sizeof(path), frame->ebx) ||
+            !user_range_valid(task_current_address_space(), frame->ecx,
+                              sizeof(struct vfs_timestamp_entry), true)) {
+            frame->eax = (uint32_t)-1; return frame;
+        }
+        struct vfs_timestamp_entry entry;
+        int result = vfs_stat_timestamps(path, &entry);
+        if (result == 0)
+            *(struct vfs_timestamp_entry *)(uintptr_t)frame->ecx = entry;
+        frame->eax = (uint32_t)result;
+        return frame;
+    }
+    if (frame->eax == SYSCALL_GETPGRP) {
+        frame->eax = task_current_process_group();
+        return frame;
+    }
+    if (frame->eax == SYSCALL_SETPGID) {
+        frame->eax = (uint32_t)task_set_process_group(frame->ebx, frame->ecx);
         return frame;
     }
     if (frame->eax == SYSCALL_UNAME) {

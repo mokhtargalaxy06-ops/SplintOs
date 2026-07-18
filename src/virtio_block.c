@@ -1,4 +1,6 @@
 #include "virtio_block.h"
+#include "arch/x86/io.h"
+#include "arch/x86/cpu.h"
 
 #include "block.h"
 #include "devices.h"
@@ -59,19 +61,6 @@ struct virtio_state {
 static struct virtio_state state;
 static uint8_t queue_memory[VIRTIO_QUEUE_BYTES] __attribute__((aligned(4096)));
 
-static inline void outb(uint16_t port, uint8_t value)
-{ __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port)); }
-static inline void outw(uint16_t port, uint16_t value)
-{ __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port)); }
-static inline void outl(uint16_t port, uint32_t value)
-{ __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port)); }
-static inline uint8_t inb(uint16_t port)
-{ uint8_t value; __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port)); return value; }
-static inline uint16_t inw(uint16_t port)
-{ uint16_t value; __asm__ volatile ("inw %1, %0" : "=a"(value) : "Nd"(port)); return value; }
-static inline uint32_t inl(uint16_t port)
-{ uint32_t value; __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port)); return value; }
-
 static void bytes_zero(void *buffer, size_t count)
 { uint8_t *bytes = buffer; while (count-- != 0) *bytes++ = 0; }
 
@@ -80,7 +69,8 @@ static uintptr_t align_up(uintptr_t value, uintptr_t alignment)
 
 static int submit(uint32_t type, uint64_t sector, void *buffer, size_t bytes)
 {
-    if (!state.ready || (bytes != 0 && buffer == NULL)) return -1;
+    if (!state.ready) return KERNEL_ERROR_BUSY;
+    if (bytes != 0 && buffer == NULL) return KERNEL_ERROR_INVALID;
     struct virtq_descriptor *descriptors = (struct virtq_descriptor *)queue_memory;
     volatile uint16_t *available = (volatile uint16_t *)(queue_memory +
         sizeof(struct virtq_descriptor) * state.queue_size);
@@ -105,34 +95,45 @@ static int submit(uint32_t type, uint64_t sector, void *buffer, size_t bytes)
 
     uint16_t available_index = available[1];
     available[2 + available_index % state.queue_size] = 0;
-    __asm__ volatile ("" : : : "memory");
+    arch_compiler_barrier();
     available[1] = (uint16_t)(available_index + 1);
     outw((uint16_t)(state.io_base + VIRTIO_QUEUE_NOTIFY), 0);
 
     for (uint32_t spin = 0; spin < VIRTIO_TIMEOUT; ++spin) {
-        __asm__ volatile ("" : : : "memory");
+        arch_compiler_barrier();
         if (used[1] != state.last_used) {
             state.last_used = used[1];
             (void)inb((uint16_t)(state.io_base + VIRTIO_ISR_STATUS));
-            return state.request_status == 0 ? 0 : -1;
+            if (state.request_status == 0) return KERNEL_OK;
+            return state.request_status == 2
+                ? KERNEL_ERROR_UNSUPPORTED : KERNEL_ERROR_IO;
         }
-        __asm__ volatile ("pause");
+        arch_cpu_relax();
     }
-    return -1;
+    return KERNEL_ERROR_TIMEOUT;
 }
 
 static int virtio_read(struct block_device *device, uint64_t sector,
                        void *buffer, size_t count)
-{ (void)device; return submit(VIRTIO_BLOCK_READ, sector, buffer, count * 512); }
+{
+    (void)device;
+    if (count > SIZE_MAX / 512) return KERNEL_ERROR_INVALID;
+    return submit(VIRTIO_BLOCK_READ, sector, buffer, count * 512);
+}
 
 static int virtio_write(struct block_device *device, uint64_t sector,
                         const void *buffer, size_t count)
-{ (void)device; return submit(VIRTIO_BLOCK_WRITE, sector, (void *)buffer, count * 512); }
+{
+    (void)device;
+    if (count > SIZE_MAX / 512) return KERNEL_ERROR_INVALID;
+    return submit(VIRTIO_BLOCK_WRITE, sector, (void *)buffer, count * 512);
+}
 
 static int virtio_flush(struct block_device *device)
 {
     (void)device;
-    return state.flush_supported ? submit(VIRTIO_BLOCK_FLUSH, 0, NULL, 0) : 0;
+    return state.flush_supported
+        ? submit(VIRTIO_BLOCK_FLUSH, 0, NULL, 0) : KERNEL_OK;
 }
 
 static const struct block_operations operations = {
@@ -142,7 +143,14 @@ static const struct block_operations operations = {
 void virtio_block_init(void)
 {
     const struct pci_device *pci = pci_find_device(VIRTIO_VENDOR, VIRTIO_BLOCK_LEGACY);
-    if (pci == NULL || (pci->bars[0] & 1U) == 0) return;
+    if (pci == NULL) {
+        serial_write("SplintOS: VirtIO block absent; using ramblk0\r\n");
+        return;
+    }
+    if ((pci->bars[0] & 1U) == 0) {
+        serial_write("SplintOS: VirtIO block has unsupported BAR; using ramblk0\r\n");
+        return;
+    }
     state = (struct virtio_state){0};
     state.io_base = (uint16_t)(pci->bars[0] & ~3U);
     pci_enable_device(pci, true, false, true);

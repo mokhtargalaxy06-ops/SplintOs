@@ -14,6 +14,10 @@ applications, and connect to a network.
 
 ## Progress snapshot
 
+The version 1 system-call contract is now single-source: call numbers and
+bounds are shared by kernel C and Ring 3 assembly, public record sizes are
+checked at compile time, and generated dependencies rebuild ABI consumers.
+
 Completed foundations now include supervisor-only kernel mappings, isolated
 Ring 3 address spaces, a TSS and syscall gate, a defensive ELF32 loader,
 separately compiled userspace programs, bounded user-copy checks, process-owned
@@ -28,8 +32,10 @@ block driver. `SPLFS4` supports bounded 4 KiB files in validated dynamic
 extents with a cross-checked allocation bitmap, checksummed metadata, and
 clean/dirty commit state. A two-boot QEMU test proves a 1,300-byte Ring 3 write, `fsync`, remount,
 and byte verification. Files now use checked first-fit dynamic extents derived
-from the authoritative directory. The active milestone is allocation failure
-coverage plus a scalable free-space structure. Automated VirtIO boots now cover
+from the authoritative directory. Allocation failure, reclamation, splitting,
+and coalescing coverage is complete; the active milestone is closing
+stabilization evidence before the versioned `SPLFS5` timestamp layout.
+Automated VirtIO boots now cover
 unknown formats, overlapping extents, and out-of-range extents non-destructively.
 Normal hardware-backed probing is now non-destructive and failed mounts reject
 all later operations.
@@ -52,8 +58,25 @@ Before introducing user space, I need to make the existing foundation reliable.
 
 ### Work
 
-- Replace remaining polling fallbacks with interrupt-driven paths where safe.
-- Add kernel assertions, structured error codes, and consistent panic reports.
+- [x] Remove the reentrant main-loop input polling fallback; PS/2 and COM1
+  receive paths are interrupt-driven.
+- [x] Remove foreground RTL8139 receive polling; receive-ring ownership is
+  interrupt-only.
+- [x] Bind RTL8139 dispatch to its validated PCI legacy IRQ line instead of
+  forwarding every otherwise-unhandled PIC interrupt to the network driver.
+- [x] Detect spurious legacy PIC IRQ7/IRQ15 and apply correct EOI semantics.
+- [x] Mask unowned PIC lines and enable only initialized timer, input, serial,
+  cascade, and network IRQs.
+- [x] Add kernel assertions and make panic reports consistent for framed CPU
+  faults and frameless internal invariant failures.
+- Add structured kernel error codes at subsystem boundaries.
+- [x] Define the structured kernel result vocabulary and apply it to generic
+  block validation, unsupported writes, capacity, and injected I/O failures.
+- [x] Preserve structured invalid, unavailable, unsupported, I/O, and timeout
+  causes through the legacy VirtIO block driver.
+- [x] Preserve structured scan and I/O causes through checked MBR partitions.
+- [x] Preserve structured flush failures through diskfs, VFS, and scheduler
+  descriptors while normalizing the version 1 Ring 3 ABI to `-1`.
 - [x] Record boot logs in a bounded in-memory ring buffer.
 - [x] Expose bounded read-only boot-log snapshots through checked user copies.
 - [x] Reap zombie children whose parent exits before collecting them.
@@ -70,13 +93,62 @@ Before introducing user space, I need to make the existing foundation reliable.
 - [x] Add blocking bounded descriptor polling with timer deadlines.
 - [x] Expose the monotonic tick clock and its explicit frequency.
 - [x] Add hostile syscall-boundary regression cases that must fail without a fault.
-- Audit interrupt locking, scheduler state, and shared device queues for races.
-- Add spinlocks and interrupt-safe locking rules for shared kernel structures.
+- [x] Audit interrupt locking, scheduler wait state, boot logging, input rings,
+  mouse/key snapshots, networking queues, and shared VFS state for races.
+- [x] Define nest-safe local interrupt save/restore helpers and remove
+  unconditional re-enabling from scheduler sleep and exit critical sections.
+- [x] Make keyboard and mouse snapshot-and-clear consumers atomic against their
+  IRQ producers.
+- [x] Make trusted console take/readiness consumers atomic against IRQ producers.
+- [x] Guard every public VFS operation against timer-preemption races with
+  foreground GUI and recovery-console access.
+- [x] Validate VFS write end-offset arithmetic once before disk bounds,
+  allocation, copying, and descriptor advancement.
+- [x] Prove a maximum-size Ring 3 truncate fails without changing file metadata
+  or terminating the caller.
+- [x] Centralize subsystem interrupt control and reject new raw `cli`/`sti`
+  instructions through the static check.
+- [x] Add an IRQ-saving spinlock abstraction, locking rules, and protection for
+  diagnostic-log snapshots and writers.
 - Add timer deadlines and timeouts so hardware failures cannot hang forever.
+- [x] Bound RTL8139 reset and per-dispatch receive work so stuck device state
+  cannot hang initialization or interrupt handling.
+- [x] Preserve RTL8139 receive interrupt assertion when the bounded dispatch
+  budget leaves frames pending.
 - Separate architecture-specific x86 code from portable kernel code.
-- Document ownership and lifetime rules for every allocated kernel object.
+- [x] Centralize x86 port-I/O assembly behind an architecture-owned header and
+  enforce the boundary with static checks.
+- [x] Document ownership, borrowing, transfer, reference, and release rules for
+  dynamic memory, tasks, descriptors, VFS nodes, storage, and network objects.
 - Test allocation failure, malformed Multiboot data, missing devices, and bad
   network packets.
+- [x] Reject overflowing, undersized, truncated, and misaligned-end Multiboot
+  memory-map records before allocator initialization.
+- [x] Exercise valid, undersized, truncated, and overflowing Multiboot map
+  fixtures during every automated boot.
+- [x] Exhaust the kernel heap deterministically, verify bounded allocation
+  failure, free all blocks, and prove coalesced reuse on every boot.
+- [x] Reject kernel allocation-alignment and RAMFS capacity-growth overflow;
+  exercise a `SIZE_MAX` allocation in the boot fixture.
+- [x] Validate `kfree` ownership against the live heap-block list and prove an
+  interior-pointer free cannot release storage.
+- [x] Track physical-page allocation provenance separately so reserved and
+  duplicate page frees cannot enter the free pool.
+- [x] Exercise unowned-page rejection and exact allocate/free/double-free page
+  accounting during every boot.
+- [x] Count unique usable pages across overlapping Multiboot available ranges.
+- [x] Validate the Multiboot information-object extent and widen reserved-range
+  page rounding to prevent 32-bit wrap.
+- [x] Gate recovery/graphics boot-data parsing, bound command-line scanning, and
+  validate the complete framebuffer pitch and physical extent.
+- [x] Stop boot before dependent subsystems and interrupts when memory
+  initialization fails.
+- [x] Roll back partial userspace `brk` growth on allocation or mapping failure
+  and preserve the original break.
+- [x] Boot to Ring 3 under QEMU with no network device and require a bounded
+  missing-RTL8139 diagnostic.
+- [x] Diagnose missing or unsupported legacy VirtIO block devices and verify
+  the explicit volatile `ramblk0` fallback in the missing-device boot.
 
 ### Exit criteria
 
@@ -84,6 +156,8 @@ Before introducing user space, I need to make the existing foundation reliable.
 - Every kernel subsystem can report initialization failure without corrupting
   unrelated subsystems.
 - Static checks and headless boot tests run automatically on every change.
+- [x] Provide one aggregate `make test-all` gate for every supported automated
+  verification profile.
 
 ## Phase 2: Build protected user space
 
@@ -215,6 +289,14 @@ same time.
 - [x] Add overflow-checked `calloc` and data-preserving `realloc`.
 - Add filesystem timestamps through a versioned `SPLFS5` layout and explicit
   migration; rename, unlink, truncation, and full-space checks are complete.
+- [x] Specify the fixed-width `SPLFS5` timestamp entry, update semantics, and
+  explicit fail-closed `SPLFS4` migration policy.
+- [x] Persist `SPLFS5` timestamps and expose them through an append-only,
+  fixed-layout Ring 3 metadata query without changing the version 1 stat ABI.
+- [x] Decode validated `SPLFS4` entries separately and prove compatibility
+  mounts are strictly read-only and byte-for-byte non-destructive.
+- [x] Add an explicit recovery-console-only `SPLFS4` to `SPLFS5` migration
+  operation using the checked dirty-to-clean metadata commit protocol.
 - [x] Add clean unmount; `fsync` and read-only dirty recovery are complete.
 
 ### Safety tests
@@ -241,6 +323,10 @@ As more programs appear, ad hoc interfaces will become difficult to maintain.
   terminals, and sockets.
 - Add anonymous pipes and basic inter-process communication.
 - Implement signals or a smaller event-notification mechanism.
+- [x] Add inherited process-group identity and checked `getpgrp`/`setpgid`
+  operations as the foundation for pipelines and foreground jobs.
+- Add terminal sessions, foreground process-group selection, and group-directed
+  stop, continue, and interrupt delivery.
 - Add terminal devices, line discipline, and job-control foundations.
 - Provide `poll` or a similar API for waiting on multiple descriptors.
 - Add shared-memory mappings only after ownership and cleanup are well defined.

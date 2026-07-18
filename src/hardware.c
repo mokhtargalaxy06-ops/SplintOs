@@ -1,4 +1,6 @@
 #include "hardware.h"
+#include "arch/x86/io.h"
+#include "arch/x86/cpu.h"
 
 #include "devices.h"
 
@@ -33,23 +35,6 @@ static size_t pci_count;
 static bool found_acpi;
 static uint32_t found_acpi_tables;
 
-static inline void outw(uint16_t port, uint16_t value)
-{
-    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline void outl(uint16_t port, uint32_t value)
-{
-    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline uint32_t inl(uint16_t port)
-{
-    uint32_t value;
-    __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
 static bool bytes_equal(const void *left, const void *right, size_t count)
 {
     const uint8_t *a = left;
@@ -68,9 +53,7 @@ static bool checksum_valid(const void *data, size_t count)
 
 static uint16_t physical_read16(uintptr_t address)
 {
-    uint16_t value;
-    __asm__ volatile ("movw (%1), %0" : "=r"(value) : "r"(address) : "memory");
-    return value;
+    return arch_physical_read16(address);
 }
 
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset)

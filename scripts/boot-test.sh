@@ -2,8 +2,15 @@
 set -eu
 
 iso=${1:?usage: boot-test.sh ISO LOG}
-log=${2:?usage: boot-test.sh ISO LOG}
+log=${2:?usage: boot-test.sh ISO LOG [rtl8139|none]}
+network=${3:-rtl8139}
 rm -f "$log"
+
+case "$network" in
+    rtl8139) nic_args='-nic user,model=rtl8139' ;;
+    none) nic_args='-nic none' ;;
+    *) echo "unsupported boot-test network profile: $network" >&2; exit 2 ;;
+esac
 
 status=0
 qemu=${QEMU:-qemu-system-i386}
@@ -11,7 +18,7 @@ qemu=${QEMU:-qemu-system-i386}
 # shellcheck disable=SC2086
 timeout 8 $qemu \
     -cdrom "$iso" \
-    -nic user,model=rtl8139 \
+    $nic_args \
     -display none \
     -monitor none \
     -serial "file:$log" \
@@ -25,7 +32,11 @@ fi
 
 for message in \
     'physical allocator, paging and heap online' \
+    'checked boot memory-map fixtures online' \
+    'kernel heap exhaustion and reuse online' \
+    'physical allocator ownership online' \
     'bounded boot log online' \
+    'checked wall-clock conversion online' \
     'PCI and ACPI discovery complete' \
     'generic block layer, cache and ramblk0 online' \
     'deterministic block write faults online' \
@@ -33,6 +44,7 @@ for message in \
     'diskfs format, flush and remount online' \
     'diskfs interrupted commit rejection online' \
     'diskfs full-disk reclamation online' \
+    'diskfs explicit legacy migration online' \
     'preemptive scheduler online' \
     'application runtime online' \
     'GDT, TSS, IDT, PIC and PIT initialized' \
@@ -66,6 +78,17 @@ for message in \
         exit 1
     }
 done
+
+if [ "$network" = none ]; then
+    grep -q 'RTL8139 unavailable; networking disabled' "$log" || {
+        echo "missing-device boot did not report disabled networking" >&2
+        exit 1
+    }
+    grep -q 'VirtIO block absent; using ramblk0' "$log" || {
+        echo "missing-device boot did not report volatile storage fallback" >&2
+        exit 1
+    }
+fi
 
 if [ "$(grep -c 'ELF user process exited status=0' "$log")" -ne 23 ]; then
     echo "the finite ELF user processes did not exit successfully" >&2

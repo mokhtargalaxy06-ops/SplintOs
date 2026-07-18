@@ -2,6 +2,8 @@
 #define SPLINT_USER_SYSCALL_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <splint/abi.h>
 
 enum splint_open_flags {
     SPLINT_READ = 1,
@@ -52,11 +54,23 @@ int sys_spawn_actions(const struct splint_spawn_request *request);
 
 struct splint_directory_entry {
     char name[32];
-    unsigned int type;
-    size_t size;
-    unsigned short mode;
-    unsigned short reserved;
-    unsigned int owner;
+    uint32_t type;
+    uint32_t size;
+    uint16_t mode;
+    uint16_t reserved;
+    uint32_t owner;
+};
+
+struct splint_timestamp_entry {
+    char name[32];
+    uint32_t type;
+    uint32_t size;
+    uint16_t mode;
+    uint16_t reserved;
+    uint32_t owner;
+    uint32_t birth_time;
+    uint32_t modification_time;
+    uint32_t change_time;
 };
 
 struct splint_memory_info { unsigned int total_kib, free_kib; };
@@ -75,6 +89,18 @@ struct splint_wall_clock {
     unsigned short year;
     unsigned char month, day, hour, minute, second;
 };
+
+_Static_assert(sizeof(struct splint_directory_entry) == 48, "directory entry ABI changed");
+_Static_assert(sizeof(struct splint_timestamp_entry) == 60, "timestamp entry ABI changed");
+_Static_assert(sizeof(struct splint_memory_info) == 8, "memory info ABI changed");
+_Static_assert(sizeof(struct splint_process_info) == 8, "process info ABI changed");
+_Static_assert(sizeof(struct splint_uname) == 48, "uname ABI changed");
+_Static_assert(sizeof(struct splint_poll_entry) == 12, "poll entry ABI changed");
+_Static_assert(sizeof(struct splint_clock) == 8, "clock ABI changed");
+_Static_assert(sizeof(struct splint_udp_endpoint) == 8, "UDP endpoint ABI changed");
+_Static_assert(sizeof(struct splint_network_config) == 16, "network config ABI changed");
+_Static_assert(sizeof(struct splint_wall_clock) == 8, "wall clock ABI changed");
+_Static_assert(sizeof(struct splint_spawn_request) == 20, "spawn request ABI changed");
 
 int sys_list(const char *path, struct splint_directory_entry *entries, size_t capacity);
 int sys_memory_info(struct splint_memory_info *info);
@@ -105,5 +131,8 @@ int sys_udp_receive(int descriptor, struct splint_udp_endpoint *endpoint,
                     void *data, size_t capacity);
 int sys_network_config(struct splint_network_config *configuration);
 int sys_wall_clock(struct splint_wall_clock *clock);
+int sys_stat_timestamps(const char *path, struct splint_timestamp_entry *entry);
+unsigned int sys_getpgrp(void);
+int sys_setpgid(unsigned int process, unsigned int process_group);
 
 #endif

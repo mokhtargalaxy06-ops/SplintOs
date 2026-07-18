@@ -18,6 +18,10 @@ int main(int argument_count, char **arguments)
     }
     if (sys_fsync(descriptor) != 0) { sys_write(1, "disk: fsync failed\r\n", 20); return 1; }
     if (sys_close(descriptor) != 0) return 1;
+    struct splint_timestamp_entry metadata;
+    if (sys_stat_timestamps(name, &metadata) != 0 || metadata.size != TEST_SIZE ||
+        metadata.birth_time == 0 || metadata.modification_time < metadata.birth_time ||
+        metadata.change_time < metadata.birth_time) return 7;
     descriptor = sys_open(name, 1);
     if (descriptor < 0 || sys_read(descriptor, read_back, TEST_SIZE) != TEST_SIZE ||
         sys_close(descriptor) != 0) return 2;

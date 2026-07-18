@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "error.h"
+
 struct block_device;
 
 struct block_operations {

@@ -10,8 +10,14 @@ int main(int argument_count, char **arguments)
     if (sys_write(1, (const void *)0xC0000000U, 1) != -1 ||
         sys_stat("/README", (struct splint_directory_entry *)0xC0000000U) != -1 ||
         sys_poll(&invalid_poll, 1, 0) != -1 || sys_sleep(0x80000000U) != -1 ||
-        sys_brk((void *)0x7FFFFFFFU) != (void *)-1) return 1;
+        sys_brk((void *)0x7FFFFFFFU) != (void *)-1 || sys_fsync(-1) != -1) return 1;
     if (sys_dup2(1, 5) != 5) return 1;
+    unsigned int inherited_group = sys_getpgrp();
+    unsigned int process = (unsigned int)sys_getpid();
+    if (inherited_group == 0 || sys_setpgid(0, 0) != 0 ||
+        sys_getpgrp() != process || sys_setpgid(0, inherited_group) != 0 ||
+        sys_getpgrp() != inherited_group || sys_setpgid(0, 0xFFFFFFFFU) != -1)
+        return 1;
     if (sys_write(5, message, sizeof(message) - 1) < 0) return 2;
     if (sys_close(5) != 0) return 3;
     int file = sys_open("/tmp/seek-test", SPLINT_READ | SPLINT_WRITE |
@@ -21,7 +27,10 @@ int main(int argument_count, char **arguments)
     struct splint_directory_entry metadata;
     if (file < 0 || sys_write(file, data, 6) != 6 || sys_dup2(file, 6) != 6 ||
         sys_seek(file, 2) != 0 || sys_read(6, result, 2) != 2 ||
-        result[0] != 'c' || result[1] != 'd' || sys_truncate(file, 3) != 0 ||
+        result[0] != 'c' || result[1] != 'd' ||
+        sys_truncate(file, (size_t)-1) != -1 ||
+        sys_stat("/tmp/seek-test", &metadata) != 0 || metadata.size != 6 ||
+        sys_truncate(file, 3) != 0 ||
         sys_close(6) != 0 ||
         sys_close(file) != 0 || sys_chmod("/tmp/seek-test", 0600) != 0 ||
         sys_stat("/tmp/seek-test", &metadata) != 0 ||

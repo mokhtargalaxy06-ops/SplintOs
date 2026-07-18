@@ -1,11 +1,13 @@
 #include "scheduler.h"
 
 #include "devices.h"
+#include "error.h"
 #include "interrupts.h"
 #include "memory.h"
 #include "filesystem.h"
 #include "network.h"
 #include "security.h"
+#include "arch/x86/cpu.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -64,6 +66,7 @@ struct task {
     uint32_t *address_space;
     struct task_descriptor descriptors[TASK_DESCRIPTOR_COUNT];
     uint32_t parent_id;
+    uint32_t process_group_id;
     int exit_status;
     uint32_t wait_child;
     uintptr_t wait_status_address;
@@ -177,7 +180,7 @@ static void descriptors_close_all(struct task *task)
 static void task_trampoline(void)
 {
     struct task *task = &tasks[current_index];
-    __asm__ volatile ("sti");
+    interrupts_enable();
     task->entry(task->context);
     task_exit();
 }
@@ -189,6 +192,7 @@ void scheduler_init(void)
     string_copy(tasks[0].name, "kernel", sizeof(tasks[0].name));
     tasks[0].state = TASK_RUNNING;
     tasks[0].uid = 0;
+    tasks[0].process_group_id = 0;
     tasks[0].address_space = address_space_kernel();
     descriptors_init(&tasks[0], NULL);
     current_index = 0;
@@ -229,6 +233,7 @@ int task_create(const char *name, task_entry entry, void *context)
     tasks[slot].uid = tasks[current_index].uid;
     tasks[slot].address_space = address_space_kernel();
     tasks[slot].parent_id = tasks[current_index].id;
+    tasks[slot].process_group_id = tasks[current_index].process_group_id;
     descriptors_init(&tasks[slot], &tasks[current_index]);
     ++active_tasks;
     return (int)tasks[slot].id;
@@ -288,6 +293,8 @@ int task_create_process_actions(const char *name, struct process_image *image,
     tasks[slot].uid = tasks[current_index].uid;
     tasks[slot].address_space = image->address_space;
     tasks[slot].parent_id = tasks[current_index].id;
+    tasks[slot].process_group_id = tasks[current_index].process_group_id != 0
+        ? tasks[current_index].process_group_id : tasks[slot].id;
     tasks[slot].exit_status = 0;
     tasks[slot].wait_child = 0;
     tasks[slot].wait_status_address = 0;
@@ -358,6 +365,7 @@ static size_t poll_evaluate(struct task *task)
 
 struct interrupt_frame *scheduler_tick(struct interrupt_frame *frame)
 {
+    KERNEL_ASSERT(current_index < MAX_TASKS, "scheduler current slot");
     if (!scheduler_ready) return frame;
     uint32_t now = timer_ticks();
     for (uint32_t i = 1; i < MAX_TASKS; ++i)
@@ -394,6 +402,8 @@ struct interrupt_frame *scheduler_tick(struct interrupt_frame *frame)
         }
     }
     tasks[current_index].state = TASK_RUNNING;
+    KERNEL_ASSERT(tasks[current_index].address_space != NULL,
+                  "running task address space");
     return frame;
 }
 
@@ -549,35 +559,58 @@ void scheduler_console_wake(void)
 void task_yield(void)
 {
     force_reschedule = true;
-    __asm__ volatile ("int $32");
+    arch_request_reschedule();
 }
 
 void task_sleep(uint32_t duration)
 {
     if (current_index == 0 || duration == 0) { task_yield(); return; }
-    __asm__ volatile ("cli");
+    interrupt_state_t interrupt_state = interrupts_save_disable();
     tasks[current_index].wake_tick = timer_ticks() + duration;
     tasks[current_index].state = TASK_SLEEPING;
-    __asm__ volatile ("sti");
+    interrupts_restore(interrupt_state);
     task_yield();
 }
 
 void task_exit(void)
 {
-    __asm__ volatile ("cli");
+    interrupt_state_t interrupt_state = interrupts_save_disable();
     if (current_index != 0) {
         descriptors_close_all(&tasks[current_index]);
         tasks[current_index].state = TASK_TERMINATED;
         if (active_tasks != 0) --active_tasks;
     }
-    __asm__ volatile ("sti");
+    interrupts_restore(interrupt_state);
     task_yield();
-    for (;;) __asm__ volatile ("hlt");
+    for (;;) arch_cpu_halt();
 }
 
 uint32_t task_current_id(void) { return tasks[current_index].id; }
 uint32_t task_count(void) { return active_tasks; }
 uint32_t task_current_uid(void) { return tasks[current_index].uid; }
+uint32_t task_current_process_group(void)
+{ return tasks[current_index].process_group_id; }
+
+int task_set_process_group(uint32_t process_id, uint32_t process_group)
+{
+    if (process_id == 0) process_id = tasks[current_index].id;
+    uint32_t target = MAX_TASKS;
+    for (uint32_t i = 0; i < MAX_TASKS; ++i)
+        if (tasks[i].state != TASK_UNUSED && tasks[i].state != TASK_TERMINATED &&
+            tasks[i].id == process_id) { target = i; break; }
+    if (target == MAX_TASKS ||
+        (target != current_index && tasks[target].parent_id != tasks[current_index].id) ||
+        tasks[target].uid != tasks[current_index].uid) return -1;
+    if (process_group == 0) process_group = process_id;
+    bool group_exists = process_group == process_id;
+    for (uint32_t i = 0; i < MAX_TASKS && !group_exists; ++i)
+        if (tasks[i].state != TASK_UNUSED && tasks[i].state != TASK_TERMINATED &&
+            tasks[i].uid == tasks[current_index].uid &&
+            tasks[i].process_group_id == process_group) group_exists = true;
+    if (!group_exists) return -1;
+    tasks[target].process_group_id = process_group;
+    return 0;
+}
 void task_set_current_uid(uint32_t uid) { tasks[current_index].uid = uid; }
 uint32_t *task_current_address_space(void) { return tasks[current_index].address_space; }
 
@@ -628,10 +661,12 @@ int task_descriptor_write(int descriptor, const void *buffer, size_t count)
 int task_descriptor_fsync(int descriptor)
 {
     if (descriptor < 0 || descriptor >= TASK_DESCRIPTOR_COUNT ||
-        !tasks[current_index].descriptors[descriptor].used) return -1;
+        !tasks[current_index].descriptors[descriptor].used)
+        return KERNEL_ERROR_INVALID;
     struct open_file *file =
         &open_files[tasks[current_index].descriptors[descriptor].open_file];
-    if (!file->used || file->type != OPEN_FILE_VFS) return -1;
+    if (!file->used || file->type != OPEN_FILE_VFS)
+        return KERNEL_ERROR_UNSUPPORTED;
     return vfs_fsync(file->vfs_descriptor);
 }
 
@@ -911,18 +946,24 @@ uintptr_t task_user_brk(uintptr_t requested)
         return requested;
     }
     uintptr_t mapped = (task->user_break + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1);
+    uintptr_t first_mapped = mapped;
     uintptr_t end = (requested + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1);
     while (mapped < end) {
         void *page = physical_page_alloc();
-        if (page == NULL) { task->user_break = mapped; return (uintptr_t)-1; }
+        if (page == NULL) goto rollback;
         for (size_t i = 0; i < PAGE_SIZE; ++i) ((uint8_t *)page)[i] = 0;
         if (!address_space_map_user(task->address_space, mapped, page, true)) {
             physical_page_free(page);
-            task->user_break = mapped;
-            return (uintptr_t)-1;
+            goto rollback;
         }
         mapped += PAGE_SIZE;
     }
     task->user_break = requested;
     return requested;
+rollback:
+    while (mapped > first_mapped) {
+        mapped -= PAGE_SIZE;
+        (void)address_space_unmap_user(task->address_space, mapped);
+    }
+    return (uintptr_t)-1;
 }

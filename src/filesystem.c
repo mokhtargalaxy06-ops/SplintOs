@@ -2,6 +2,8 @@
 
 #include "devices.h"
 #include "diskfs.h"
+#include "error.h"
+#include "interrupts.h"
 #include "memory.h"
 #include "scheduler.h"
 #include "security.h"
@@ -32,6 +34,7 @@ struct vfs_node {
     uint32_t owner;
     bool disk_backed;
     bool disk_mount;
+    uint32_t birth_time, modification_time, change_time;
 };
 
 struct file_descriptor {
@@ -173,6 +176,12 @@ static int node_create(const char *path, enum vfs_node_type type)
                 nodes[i].used = false;
                 return -1;
             }
+            struct diskfs_entry metadata;
+            if (diskfs_stat(disk_name, &metadata) == 0) {
+                nodes[i].birth_time = metadata.birth_time;
+                nodes[i].modification_time = metadata.modification_time;
+                nodes[i].change_time = metadata.change_time;
+            }
         }
         name_copy(nodes[i].name, name, length);
         return 0;
@@ -180,10 +189,10 @@ static int node_create(const char *path, enum vfs_node_type type)
     return -1;
 }
 
-int vfs_mkdir(const char *path) { return node_create(path, VFS_DIRECTORY); }
-int vfs_create(const char *path) { return node_create(path, VFS_FILE); }
+static int vfs_mkdir_unlocked(const char *path) { return node_create(path, VFS_DIRECTORY); }
+static int vfs_create_unlocked(const char *path) { return node_create(path, VFS_FILE); }
 
-int vfs_rmdir(const char *path)
+static int vfs_rmdir_unlocked(const char *path)
 {
     uint16_t node = path_resolve(path);
     if (node == NO_NODE || node == 0 || nodes[node].type != VFS_DIRECTORY ||
@@ -195,7 +204,7 @@ int vfs_rmdir(const char *path)
     return 0;
 }
 
-int vfs_open(const char *path, uint32_t flags)
+static int vfs_open_unlocked(const char *path, uint32_t flags)
 {
     uint16_t node = path_resolve(path);
     if (node == NO_NODE && (flags & VFS_CREATE) != 0) {
@@ -209,9 +218,17 @@ int vfs_open(const char *path, uint32_t flags)
         !security_has_capability(CAP_DEVICE_ACCESS)) return -1;
     if ((flags & VFS_TRUNCATE) != 0 && (flags & VFS_WRITE) != 0 &&
         nodes[node].type == VFS_FILE) {
-        nodes[node].size = 0;
         if (nodes[node].disk_backed && diskfs_write_file(nodes[node].name, "", 0) != 0)
             return -1;
+        nodes[node].size = 0;
+        if (nodes[node].disk_backed) {
+            struct diskfs_entry metadata;
+            if (diskfs_stat(nodes[node].name, &metadata) == 0) {
+                nodes[node].birth_time = metadata.birth_time;
+                nodes[node].modification_time = metadata.modification_time;
+                nodes[node].change_time = metadata.change_time;
+            }
+        }
     }
     for (int fd = 0; fd < MAX_DESCRIPTORS; ++fd) {
         if (descriptors[fd].used) continue;
@@ -224,14 +241,14 @@ int vfs_open(const char *path, uint32_t flags)
     return -1;
 }
 
-int vfs_close(int fd)
+static int vfs_close_unlocked(int fd)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
     descriptors[fd].used = false;
     return 0;
 }
 
-int vfs_read(int fd, void *buffer, size_t count)
+static int vfs_read_unlocked(int fd, void *buffer, size_t count)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used || buffer == NULL ||
         (descriptors[fd].flags & VFS_READ) == 0) return -1;
@@ -258,7 +275,10 @@ static bool file_reserve(struct vfs_node *node, size_t required)
 {
     if (required <= node->capacity) return true;
     size_t capacity = node->capacity == 0 ? 64 : node->capacity;
-    while (capacity < required) capacity *= 2;
+    while (capacity < required) {
+        if (capacity > SIZE_MAX / 2) return false;
+        capacity *= 2;
+    }
     uint8_t *data = kmalloc(capacity);
     if (data == NULL) return false;
     if (node->data != NULL) {
@@ -270,7 +290,7 @@ static bool file_reserve(struct vfs_node *node, size_t required)
     return true;
 }
 
-int vfs_write(int fd, const void *buffer, size_t count)
+static int vfs_write_unlocked(int fd, const void *buffer, size_t count)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used || buffer == NULL ||
         (descriptors[fd].flags & VFS_WRITE) == 0) return -1;
@@ -286,8 +306,10 @@ int vfs_write(int fd, const void *buffer, size_t count)
         }
         return (int)count;
     }
+    if (count > SIZE_MAX - file->offset) return -1;
+    size_t end_offset = file->offset + count;
     if (node->disk_backed) {
-        if (file->offset + count > DISKFS_FILE_SIZE) return -1;
+        if (end_offset > DISKFS_FILE_SIZE) return -1;
         uint8_t *contents = kmalloc(DISKFS_FILE_SIZE);
         if (contents == NULL) return -1;
         for (size_t i = 0; i < DISKFS_FILE_SIZE; ++i) contents[i] = 0;
@@ -296,21 +318,27 @@ int vfs_write(int fd, const void *buffer, size_t count)
             if (size < 0 || (size_t)size != node->size) { kfree(contents); return -1; }
         }
         bytes_copy(contents + file->offset, buffer, count);
-        size_t new_size = file->offset + count > node->size ? file->offset + count : node->size;
+        size_t new_size = end_offset > node->size ? end_offset : node->size;
         if (diskfs_write_file(node->name, contents, new_size) != 0) {
             kfree(contents); return -1;
         }
         kfree(contents);
+        struct diskfs_entry metadata;
+        if (diskfs_stat(node->name, &metadata) == 0) {
+            node->birth_time = metadata.birth_time;
+            node->modification_time = metadata.modification_time;
+            node->change_time = metadata.change_time;
+        }
     } else {
-        if (!file_reserve(node, file->offset + count)) return -1;
+        if (!file_reserve(node, end_offset)) return -1;
         bytes_copy(node->data + file->offset, buffer, count);
     }
-    file->offset += count;
+    file->offset = end_offset;
     if (file->offset > node->size) node->size = file->offset;
     return (int)count;
 }
 
-int vfs_seek(int fd, size_t offset)
+static int vfs_seek_unlocked(int fd, size_t offset)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
     if (offset > nodes[descriptors[fd].node].size) return -1;
@@ -318,7 +346,7 @@ int vfs_seek(int fd, size_t offset)
     return 0;
 }
 
-int vfs_truncate(int fd, size_t size)
+static int vfs_truncate_unlocked(int fd, size_t size)
 {
     if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used ||
         (descriptors[fd].flags & VFS_WRITE) == 0) return -1;
@@ -338,6 +366,12 @@ int vfs_truncate(int fd, size_t size)
         int result = diskfs_write_file(node->name, contents, size);
         kfree(contents);
         if (result != 0) return -1;
+        struct diskfs_entry metadata;
+        if (diskfs_stat(node->name, &metadata) == 0) {
+            node->birth_time = metadata.birth_time;
+            node->modification_time = metadata.modification_time;
+            node->change_time = metadata.change_time;
+        }
     } else {
         if (!file_reserve(node, size)) return -1;
         for (size_t i = node->size; i < size; ++i) node->data[i] = 0;
@@ -350,15 +384,16 @@ int vfs_truncate(int fd, size_t size)
     return 0;
 }
 
-int vfs_fsync(int fd)
+static int vfs_fsync_unlocked(int fd)
 {
-    if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used) return -1;
+    if (fd < 0 || fd >= MAX_DESCRIPTORS || !descriptors[fd].used)
+        return KERNEL_ERROR_INVALID;
     struct vfs_node *node = &nodes[descriptors[fd].node];
-    if (node->type != VFS_FILE) return -1;
-    return node->disk_backed ? diskfs_flush() : 0;
+    if (node->type != VFS_FILE) return KERNEL_ERROR_UNSUPPORTED;
+    return node->disk_backed ? diskfs_flush() : KERNEL_OK;
 }
 
-int vfs_unlink(const char *path)
+static int vfs_unlink_unlocked(const char *path)
 {
     uint16_t node = path_resolve(path);
     if (node == NO_NODE || nodes[node].type != VFS_FILE ||
@@ -371,7 +406,7 @@ int vfs_unlink(const char *path)
     return 0;
 }
 
-int vfs_rename(const char *old_path, const char *new_path)
+static int vfs_rename_unlocked(const char *old_path, const char *new_path)
 {
     uint16_t node = path_resolve(old_path);
     uint16_t destination = path_resolve(new_path);
@@ -394,6 +429,12 @@ int vfs_rename(const char *old_path, const char *new_path)
         char replacement[NAME_LENGTH];
         name_copy(replacement, new_name, new_length);
         if (diskfs_rename(nodes[node].name, replacement) != 0) return -1;
+        struct diskfs_entry metadata;
+        if (diskfs_stat(replacement, &metadata) == 0) {
+            nodes[node].birth_time = metadata.birth_time;
+            nodes[node].modification_time = metadata.modification_time;
+            nodes[node].change_time = metadata.change_time;
+        }
     }
     if (destination != NO_NODE) {
         if (nodes[destination].data != NULL) kfree(nodes[destination].data);
@@ -403,7 +444,8 @@ int vfs_rename(const char *old_path, const char *new_path)
     return 0;
 }
 
-int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capacity)
+static int vfs_list_unlocked(const char *path, struct vfs_directory_entry *entries,
+                             size_t capacity)
 {
     uint16_t directory = path_resolve(path);
     if (directory == NO_NODE || nodes[directory].type != VFS_DIRECTORY || entries == NULL) return -1;
@@ -421,7 +463,7 @@ int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capac
     return (int)count;
 }
 
-int vfs_stat(const char *path, struct vfs_directory_entry *entry)
+static int vfs_stat_unlocked(const char *path, struct vfs_directory_entry *entry)
 {
     if (entry == NULL) return -1;
     uint16_t node = path_resolve(path);
@@ -435,16 +477,75 @@ int vfs_stat(const char *path, struct vfs_directory_entry *entry)
     return 0;
 }
 
-int vfs_chmod(const char *path, uint16_t mode)
+static int vfs_stat_timestamps_unlocked(const char *path,
+                                        struct vfs_timestamp_entry *entry)
+{
+    if (entry == NULL) return -1;
+    uint16_t node = path_resolve(path);
+    if (node == NO_NODE) return -1;
+    *entry = (struct vfs_timestamp_entry){0};
+    name_copy(entry->name, nodes[node].name, string_length(nodes[node].name));
+    entry->type = nodes[node].type;
+    entry->size = nodes[node].size;
+    entry->mode = nodes[node].mode;
+    entry->owner = nodes[node].owner;
+    entry->birth_time = nodes[node].birth_time;
+    entry->modification_time = nodes[node].modification_time;
+    entry->change_time = nodes[node].change_time;
+    return 0;
+}
+
+static int vfs_chmod_unlocked(const char *path, uint16_t mode)
 {
     uint16_t node = path_resolve(path);
     if (node == NO_NODE || mode > 0777) return -1;
     if (task_current_uid() != nodes[node].owner &&
         !security_has_capability(CAP_CHANGE_PERMISSIONS)) return -1;
+    if (nodes[node].disk_backed && diskfs_touch_metadata(nodes[node].name) != 0)
+        return -1;
     nodes[node].mode = mode;
+    if (nodes[node].disk_backed) {
+        struct diskfs_entry metadata;
+        if (diskfs_stat(nodes[node].name, &metadata) == 0)
+            nodes[node].change_time = metadata.change_time;
+    }
     security_audit("filesystem permissions changed");
     return 0;
 }
+
+#define VFS_LOCKED_CALL(expression) do { \
+    interrupt_state_t state = interrupts_save_disable(); \
+    int result = (expression); \
+    interrupts_restore(state); \
+    return result; \
+} while (0)
+
+int vfs_mkdir(const char *path) { VFS_LOCKED_CALL(vfs_mkdir_unlocked(path)); }
+int vfs_rmdir(const char *path) { VFS_LOCKED_CALL(vfs_rmdir_unlocked(path)); }
+int vfs_create(const char *path) { VFS_LOCKED_CALL(vfs_create_unlocked(path)); }
+int vfs_open(const char *path, uint32_t flags)
+{ VFS_LOCKED_CALL(vfs_open_unlocked(path, flags)); }
+int vfs_close(int descriptor) { VFS_LOCKED_CALL(vfs_close_unlocked(descriptor)); }
+int vfs_read(int descriptor, void *buffer, size_t count)
+{ VFS_LOCKED_CALL(vfs_read_unlocked(descriptor, buffer, count)); }
+int vfs_write(int descriptor, const void *buffer, size_t count)
+{ VFS_LOCKED_CALL(vfs_write_unlocked(descriptor, buffer, count)); }
+int vfs_seek(int descriptor, size_t offset)
+{ VFS_LOCKED_CALL(vfs_seek_unlocked(descriptor, offset)); }
+int vfs_truncate(int descriptor, size_t size)
+{ VFS_LOCKED_CALL(vfs_truncate_unlocked(descriptor, size)); }
+int vfs_fsync(int descriptor) { VFS_LOCKED_CALL(vfs_fsync_unlocked(descriptor)); }
+int vfs_unlink(const char *path) { VFS_LOCKED_CALL(vfs_unlink_unlocked(path)); }
+int vfs_rename(const char *old_path, const char *new_path)
+{ VFS_LOCKED_CALL(vfs_rename_unlocked(old_path, new_path)); }
+int vfs_list(const char *path, struct vfs_directory_entry *entries, size_t capacity)
+{ VFS_LOCKED_CALL(vfs_list_unlocked(path, entries, capacity)); }
+int vfs_stat(const char *path, struct vfs_directory_entry *entry)
+{ VFS_LOCKED_CALL(vfs_stat_unlocked(path, entry)); }
+int vfs_stat_timestamps(const char *path, struct vfs_timestamp_entry *entry)
+{ VFS_LOCKED_CALL(vfs_stat_timestamps_unlocked(path, entry)); }
+int vfs_chmod(const char *path, uint16_t mode)
+{ VFS_LOCKED_CALL(vfs_chmod_unlocked(path, mode)); }
 
 static void initial_file(const char *path, const char *contents)
 {
@@ -491,6 +592,9 @@ void filesystem_init(void)
                 if (child != NO_NODE) {
                     nodes[child].disk_backed = true;
                     nodes[child].size = entries[i].size;
+                    nodes[child].birth_time = entries[i].birth_time;
+                    nodes[child].modification_time = entries[i].modification_time;
+                    nodes[child].change_time = entries[i].change_time;
                 }
             }
         }

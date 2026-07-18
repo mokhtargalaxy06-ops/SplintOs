@@ -19,6 +19,7 @@ struct mouse_state {
     int16_t dx;
     int16_t dy;
     bool left;
+    bool left_pressed;
     bool changed;
 };
 
@@ -36,5 +37,6 @@ size_t boot_log_read(char *buffer, size_t capacity);
 int console_take_character(void);
 bool console_has_character(void);
 bool devices_wall_clock(struct wall_clock *clock);
+bool devices_wall_clock_seconds(uint32_t *seconds);
 
 #endif

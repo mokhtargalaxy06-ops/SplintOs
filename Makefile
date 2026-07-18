@@ -1,12 +1,32 @@
 CROSS ?=
 CC := $(CROSS)gcc
 LD := $(CROSS)ld
+CROSS64 ?=
+CC64 := $(CROSS64)gcc
+LD64 := $(CROSS64)ld
 
 BUILD := build
 ISO_ROOT := $(BUILD)/iso
 KERNEL := $(BUILD)/splintos.bin
 ISO := $(BUILD)/splintos.iso
+RECOVERY_ISO_ROOT := $(BUILD)/recovery-iso
+RECOVERY_ISO := $(BUILD)/splintos-recovery.iso
 USER_BUILD := $(BUILD)/user
+X86_64_BUILD := $(BUILD)/x86_64
+X86_64_PROBE := $(X86_64_BUILD)/toolchain-probe.o
+X86_64_KERNEL := $(X86_64_BUILD)/splintos-x86_64.bin
+X86_64_ISO_ROOT := $(X86_64_BUILD)/iso
+X86_64_ISO := $(X86_64_BUILD)/splintos-x86_64.iso
+X86_64_OBJECTS := $(X86_64_BUILD)/boot.o $(X86_64_BUILD)/kernel.o \
+	$(X86_64_BUILD)/gdt.o $(X86_64_BUILD)/idt.o \
+	$(X86_64_BUILD)/exception_stubs.o $(X86_64_BUILD)/irq_stubs.o \
+	$(X86_64_BUILD)/timer.o $(X86_64_BUILD)/hardware.o $(X86_64_BUILD)/block.o \
+	$(X86_64_BUILD)/input.o $(X86_64_BUILD)/vfs.o $(X86_64_BUILD)/network.o \
+	$(X86_64_BUILD)/graphics.o $(X86_64_BUILD)/virtio_block.o \
+	$(X86_64_BUILD)/dma.o $(X86_64_BUILD)/abi.o $(X86_64_BUILD)/paging.o \
+	$(X86_64_BUILD)/syscall_entry.o $(X86_64_BUILD)/syscall.o \
+	$(X86_64_BUILD)/usercopy.o \
+	$(X86_64_BUILD)/physical.o $(X86_64_BUILD)/heap.o
 USER_HELLO := $(USER_BUILD)/hello.elf
 USER_CAT := $(USER_BUILD)/cat.elf
 USER_RUNNER := $(USER_BUILD)/runner.elf
@@ -25,7 +45,8 @@ QEMU := ./scripts/qemu-clean.sh qemu-system-i386
 
 CFLAGS := -m32 -std=gnu11 -ffreestanding -fno-pie -fstack-protector-strong \
 	-mstack-protector-guard=global \
-	-Wall -Wextra -Werror -O2 -Iinclude
+	-fno-omit-frame-pointer -fno-optimize-sibling-calls \
+	-Wall -Wextra -Werror -O2 -MMD -MP -Iinclude
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib
 
 OBJECTS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/network.o $(BUILD)/gui.o \
@@ -42,7 +63,7 @@ OBJECTS += $(BUILD)/partition.o
 OBJECTS += $(BUILD)/diskfs.o
 OBJECTS += $(BUILD)/virtio_block.o
 
-.PHONY: all iso run clean check check-user test test-boot test-storage debug toolchain
+.PHONY: all iso run clean ci check check-user check-layout check-docs check-x86_64-toolchain test test-all test-unit test-reproducible test-boot test-recovery test-missing-devices test-storage test-x86_64 test-equivalence debug toolchain toolchain-x86_64 x86_64-kernel x86_64-iso
 
 all: $(KERNEL)
 
@@ -110,15 +131,122 @@ $(USER_BUILD):
 	mkdir -p $@
 
 USER_CFLAGS := -m32 -std=gnu11 -ffreestanding -fno-pie -fno-stack-protector \
-	-Wall -Wextra -Werror -O2 -Iuser/include
+	-Wall -Wextra -Werror -O2 -MMD -MP -Iuser/include -Iinclude
+
+X86_64_CFLAGS := -m64 -std=gnu11 -ffreestanding -fno-pie -mno-red-zone \
+	-mcmodel=kernel -fno-stack-protector -Wall -Wextra -Werror -O2 \
+	-MMD -MP -Iinclude
+
+$(X86_64_BUILD):
+	mkdir -p $@
+
+$(X86_64_PROBE): src/arch/x86_64/toolchain_probe.c | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+check-x86_64-toolchain: $(X86_64_PROBE)
+	@readelf -h $(X86_64_PROBE) | grep -q 'Class:.*ELF64'
+	@readelf -h $(X86_64_PROBE) | grep -q 'Machine:.*Advanced Micro Devices X86-64'
+	@echo "x86_64 freestanding toolchain profile verified"
+
+$(X86_64_BUILD)/boot.o: src/arch/x86_64/boot.S | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/kernel.o: src/arch/x86_64/kernel.c include/arch/x86_64/layout.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/gdt.o: src/arch/x86_64/gdt.c include/arch/x86_64/gdt.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/idt.o: src/arch/x86_64/idt.c include/arch/x86_64/platform.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/exception_stubs.o: src/arch/x86_64/exception_stubs.S | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/irq_stubs.o: src/arch/x86_64/irq_stubs.S | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/timer.o: src/arch/x86_64/timer.c include/arch/x86_64/timer.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/hardware.o: src/arch/x86_64/hardware.c include/arch/x86_64/hardware.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/block.o: src/arch/x86_64/block.c include/arch/x86_64/block.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/input.o: src/arch/x86_64/input.c include/arch/x86_64/input.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/vfs.o: src/arch/x86_64/vfs.c include/arch/x86_64/vfs.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/network.o: src/arch/x86_64/network.c include/arch/x86_64/network.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/graphics.o: src/arch/x86_64/graphics.c include/arch/x86_64/graphics.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/virtio_block.o: src/arch/x86_64/virtio_block.c include/arch/x86_64/virtio_block.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/dma.o: src/arch/x86_64/dma.c include/arch/x86_64/dma.h include/arch/x86_64/physical.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/abi.o: src/arch/x86_64/abi.c include/arch/x86_64/abi.h include/splint/abi64.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/syscall_entry.o: src/arch/x86_64/syscall_entry.S | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/syscall.o: src/arch/x86_64/syscall.c include/arch/x86_64/syscall.h include/splint/abi64.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/usercopy.o: src/arch/x86_64/usercopy.c include/arch/x86_64/usercopy.h include/arch/x86_64/paging.h include/arch/x86_64/layout.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/paging.o: src/arch/x86_64/paging.c include/arch/x86_64/paging.h include/arch/x86_64/layout.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/physical.o: src/arch/x86_64/physical.c include/arch/x86_64/physical.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_BUILD)/heap.o: src/arch/x86_64/heap.c include/arch/x86_64/heap.h | $(X86_64_BUILD)
+	$(CC64) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_KERNEL): $(X86_64_OBJECTS) linker-x86_64.ld
+	$(LD64) -m elf_x86_64 -T linker-x86_64.ld -nostdlib -o $@ $(X86_64_OBJECTS)
+	@grub-file --is-x86-multiboot $@
+	@readelf -h $@ | grep -q 'Class:.*ELF64'
+	@echo "Built $@"
+
+x86_64-kernel: check-x86_64-toolchain $(X86_64_KERNEL)
+
+$(X86_64_ISO): $(X86_64_KERNEL) tests/fixtures/grub-x86_64.cfg
+	mkdir -p $(X86_64_ISO_ROOT)/boot/grub
+	cp $(X86_64_KERNEL) $(X86_64_ISO_ROOT)/boot/splintos-x86_64.bin
+	cp tests/fixtures/grub-x86_64.cfg $(X86_64_ISO_ROOT)/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(X86_64_ISO_ROOT)
+
+x86_64-iso: $(X86_64_ISO)
+
+test-x86_64: $(X86_64_ISO)
+	@command -v qemu-system-x86_64 >/dev/null || { echo "qemu-system-x86_64 is required"; exit 1; }
+	@QEMU64=qemu-system-x86_64 ./tests/integration/x86_64-boot.sh $(X86_64_ISO) $(X86_64_BUILD)/boot.log
+
+test-equivalence: $(ISO) $(X86_64_ISO)
+	@QEMU="$(QEMU)" ./tests/integration/boot.sh $(ISO) $(BUILD)/equivalence-32.log
+	@QEMU="$(QEMU)" ./tests/integration/boot.sh $(ISO) $(BUILD)/equivalence-32-missing.log none
+	@QEMU64=qemu-system-x86_64 ./tests/integration/x86_64-boot.sh $(X86_64_ISO) $(X86_64_BUILD)/equivalence-64.log
+	@./tests/integration/behavior-equivalence.sh $(BUILD)/equivalence-32.log $(BUILD)/equivalence-32-missing.log $(X86_64_BUILD)/equivalence-64.log
 
 $(USER_BUILD)/crt0.o: user/crt0.S | $(USER_BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_BUILD)/syscall.o: user/libc/syscall.S | $(USER_BUILD)
+$(USER_BUILD)/syscall.o: user/libc/syscall.S include/splint/abi.h | $(USER_BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_BUILD)/hello.o: user/programs/hello.c user/include/splint/syscall.h | $(USER_BUILD)
+$(USER_BUILD)/hello.o: user/programs/hello.c user/include/splint/syscall.h include/splint/abi.h | $(USER_BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
 $(USER_BUILD)/cat.o: user/programs/cat.c user/include/splint/syscall.h | $(USER_BUILD)
@@ -219,7 +347,7 @@ check: $(KERNEL)
 	@command -v grub-file >/dev/null || { echo "grub-file is required for this check"; exit 1; }
 	@grub-file --is-x86-multiboot $(KERNEL)
 	@echo "Multiboot header verified"
-	@./scripts/static-check.sh $(KERNEL)
+	@./tests/static/kernel.sh $(KERNEL)
 	@grep -q 'SplintOS (recovery)' grub/grub.cfg
 
 check-user: $(USER_HELLO) $(USER_CAT) $(USER_RUNNER) $(USER_SHELL) $(USER_FDTEST) $(USER_ECHO) $(USER_PIPETEST) $(USER_WC) $(USER_LS) $(USER_MEM) $(USER_UPTIME) $(USER_PS) $(USER_HEAPTEST) $(USER_DISK)
@@ -241,8 +369,30 @@ check-user: $(USER_HELLO) $(USER_CAT) $(USER_RUNNER) $(USER_SHELL) $(USER_FDTEST
 	@readelf -h $(USER_DISK) | grep -q 'Type:.*EXEC'
 	@echo "User ELF format verified"
 
-test: check check-user
+check-layout:
+	@./tests/check-layout.sh
+
+check-docs:
+	@./tests/documentation-links.sh
+
+test: check-layout check-docs check check-user
 	@echo "All static kernel checks passed"
+
+test-all: test test-unit test-recovery test-missing-devices test-storage test-equivalence
+	@echo "All supported SplintOS verification profiles passed"
+
+ci:
+	@$(MAKE) clean
+	@$(MAKE) test-reproducible
+	@$(MAKE) test-all
+	@echo "Clean SplintOS CI verification passed"
+
+test-reproducible:
+	@MAKE="$(MAKE)" ./tests/reproducible-build.sh
+
+test-unit: $(ISO)
+	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
+	@QEMU="$(QEMU)" ./tests/unit/kernel-contracts.sh $(ISO) $(BUILD)/unit-contracts.log
 
 iso: $(ISO)
 
@@ -255,17 +405,33 @@ $(ISO): $(KERNEL) grub/grub.cfg
 	cp grub/grub.cfg $(ISO_ROOT)/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(ISO_ROOT)
 
+$(RECOVERY_ISO): $(KERNEL) tests/fixtures/grub-recovery.cfg
+	@command -v grub-mkrescue >/dev/null || { echo "grub-mkrescue is required"; exit 1; }
+	@command -v mformat >/dev/null || { echo "mformat is required; install the mtools package"; exit 1; }
+	mkdir -p $(RECOVERY_ISO_ROOT)/boot/grub
+	cp $(KERNEL) $(RECOVERY_ISO_ROOT)/boot/splintos.bin
+	cp tests/fixtures/grub-recovery.cfg $(RECOVERY_ISO_ROOT)/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(RECOVERY_ISO_ROOT)
+
 run: $(ISO)
 	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
 	$(QEMU) -cdrom $(ISO) -nic user,model=rtl8139 -serial stdio
 
 test-boot: $(ISO)
 	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
-	@QEMU="$(QEMU)" ./scripts/boot-test.sh $(ISO) $(BUILD)/boot-test.log
+	@QEMU="$(QEMU)" ./tests/integration/boot.sh $(ISO) $(BUILD)/boot-test.log
+
+test-recovery: $(RECOVERY_ISO)
+	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
+	@QEMU="$(QEMU)" ./tests/integration/recovery.sh $(RECOVERY_ISO) $(BUILD)/recovery-test.log
+
+test-missing-devices: $(ISO)
+	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
+	@QEMU="$(QEMU)" ./tests/integration/boot.sh $(ISO) $(BUILD)/missing-device-test.log none
 
 test-storage: $(ISO)
 	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
-	@QEMU="$(QEMU)" ./scripts/storage-test.sh $(ISO) $(BUILD)/storage-test.img $(BUILD)/storage-test
+	@QEMU="$(QEMU)" ./tests/integration/storage.sh $(ISO) $(BUILD)/storage-test.img $(BUILD)/storage-test
 
 debug: $(ISO)
 	@command -v qemu-system-i386 >/dev/null || { echo "qemu-system-i386 is required"; exit 1; }
@@ -276,5 +442,12 @@ toolchain:
 	@echo "LD: $$($(LD) --version | head -1)"
 	@echo "Prefix: $(if $(CROSS),$(CROSS),host tools)"
 
+toolchain-x86_64: check-x86_64-toolchain
+	@echo "CC64: $$($(CC64) --version | head -1)"
+	@echo "LD64: $$($(LD64) --version | head -1)"
+	@echo "Prefix64: $(if $(CROSS64),$(CROSS64),host tools with explicit -m64)"
+
 clean:
 	rm -rf $(BUILD)
+
+-include $(OBJECTS:.o=.d) $(wildcard $(USER_BUILD)/*.d) $(wildcard $(X86_64_BUILD)/*.d)

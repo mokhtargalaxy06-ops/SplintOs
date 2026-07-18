@@ -13,6 +13,7 @@
 #include "block.h"
 #include "partition.h"
 #include "diskfs.h"
+#include "arch/x86/cpu.h"
 
 static void maintenance_task(void *context)
 {
@@ -42,12 +43,15 @@ static bool recovery_requested(uint32_t address)
 {
     const struct multiboot_command_info *info =
         (const struct multiboot_command_info *)(uintptr_t)address;
-    if ((info->flags & (1U << 2)) == 0 || info->command_line == 0) return false;
+    enum { COMMAND_LINE_LIMIT = 256 };
+    if ((info->flags & (1U << 2)) == 0 || info->command_line == 0 ||
+        info->command_line > UINT32_MAX - COMMAND_LINE_LIMIT) return false;
     const char *text = (const char *)(uintptr_t)info->command_line;
     static const char recovery[] = "recovery";
-    for (size_t i = 0; text[i] != '\0'; ++i) {
+    for (size_t i = 0; i < COMMAND_LINE_LIMIT && text[i] != '\0'; ++i) {
         size_t j = 0;
-        while (recovery[j] != '\0' && text[i + j] == recovery[j]) ++j;
+        while (recovery[j] != '\0' && i + j < COMMAND_LINE_LIMIT &&
+               text[i + j] == recovery[j]) ++j;
         if (recovery[j] == '\0') return true;
     }
     return false;
@@ -103,28 +107,37 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info)
     }
 
     devices_init();
-    bool recovery = recovery_requested(multiboot_info);
     bool memory_ready = memory_init(multiboot_info);
+    if (!memory_ready) {
+        serial_write("SplintOS: memory initialization failed; boot stopped\r\n");
+        terminal_write("SplintOS: memory initialization failed.\n");
+        return;
+    }
+    bool recovery = recovery_requested(multiboot_info);
     hardware_init();
     block_init();
-    partition_init();
+    (void)partition_init();
     diskfs_init();
     bool graphics = gui_init(multiboot_info);
     bool networking = network_init();
-    if (memory_ready) {
-        scheduler_init();
-        security_init();
-        filesystem_init();
-        (void)task_create("maintenance", maintenance_task, NULL);
-        applications_init(recovery);
-        if (!recovery) {
-            if (elf_load_process("/bin/hello", "hello") < 0)
-                serial_write("SplintOS: failed to load /bin/hello\r\n");
-            else
-                serial_write("SplintOS: ELF loader online\r\n");
-            if (elf_load_process("/bin/sh", "shell") < 0)
-                serial_write("SplintOS: failed to load /bin/sh\r\n");
-        }
+    if (graphics)
+        serial_write("SplintOS: framebuffer compositor online\r\n");
+    if (networking)
+        serial_write("SplintOS: RTL8139 DMA and IRQ online\r\n");
+    if (!networking)
+        serial_write("SplintOS: RTL8139 unavailable; networking disabled\r\n");
+    scheduler_init();
+    security_init();
+    filesystem_init();
+    (void)task_create("maintenance", maintenance_task, NULL);
+    applications_init(recovery);
+    if (!recovery) {
+        if (elf_load_process("/bin/hello", "hello") < 0)
+            serial_write("SplintOS: failed to load /bin/hello\r\n");
+        else
+            serial_write("SplintOS: ELF loader online\r\n");
+        if (elf_load_process("/bin/sh", "shell") < 0)
+            serial_write("SplintOS: failed to load /bin/sh\r\n");
     }
     interrupts_init();
     if (graphics) {
@@ -133,18 +146,15 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info)
         terminal_write("SplintOS graphical mode unavailable.\n");
         terminal_write(networking ? "Network ready: 10.0.2.15/24.\n"
                                   : "No RTL8139 network adapter found.\n");
-        terminal_write(memory_ready ? "Memory manager ready.\n"
-                                    : "Memory manager unavailable.\n");
+        terminal_write("Memory manager ready.\n");
     }
 
     for (;;) {
-        if (networking) {
-            network_poll();
-        }
+        /* Hypervisors do not all deliver legacy PS/2 IRQs identically. */
+        devices_poll();
         if (graphics) {
             gui_poll();
         }
-        devices_poll();
-        __asm__ volatile ("pause");
+        arch_cpu_relax();
     }
 }
