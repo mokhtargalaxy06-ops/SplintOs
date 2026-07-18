@@ -1,20 +1,157 @@
 # SplintOS
 
-SplintOS is a tiny educational x86 kernel. It boots through GRUB's Multiboot
-interface, creates its own stack, enters C code, and writes directly to VGA text
-memory. It also includes a polling RTL8139 driver and a small Ethernet stack.
+SplintOS is an independent educational x86 operating system written from
+scratch in C and x86 assembly. It boots through GRUB Multiboot and provides its
+own kernel, graphical desktop, Ring 3 applications, filesystems, device drivers,
+network stack, command shell, and automated verification profiles.
+
+GRUB starts SplintOS, but the operating system does not use:
+
+- The Linux kernel
+- GNU/Linux userland
+- Linux drivers
+- Linux applications or package managers
+
+![SplintOS graphical desktop](docs/images/splintos-desktop.png)
+
+See the [complete screenshot gallery](docs/screenshots.md) for the Network,
+Files, Terminal, and About windows.
+
+## What can SplintOS do?
+
+SplintOS currently provides:
+
+- Bootable 32-bit x86 kernel and ISO using GRUB Multiboot
+- A parallel, boot-tested x86_64 foundation with long mode, four-level paging,
+  64-bit memory management, timer preemption, PCI/ACPI, bounded block I/O,
+  device-independent input events, an in-memory VFS foundation, and a bounded
+  UDP/IPv4 parsing and loopback core
+- A boot-tested x86_64 Multiboot framebuffer with an 800x600 software canvas,
+  clipped drawing, dirty-region presentation, and mapped 32-bit MMIO aperture
+- An x86_64 PS/2 keyboard IRQ path with bounded scancode decoding and
+  device-independent key events
+- An x86_64 PS/2 mouse IRQ path with bounded controller handshakes, packet
+  synchronization, signed motion, and button events
+- An x86_64 RTL8139 RX/TX driver with checked PCI I/O enablement, explicit
+  low-address DMA ownership, bounded descriptor completion and IRQ draining,
+  and a dedicated QEMU profile
+- An end-to-end x86_64 DHCP client verified through RTL8139 Discover, Offer,
+  Request, and ACK traffic against QEMU's user-network service
+- An x86_64 legacy VirtIO block driver with checked queue geometry, bounded
+  completion, read/write/flush requests, and disposable-disk persistence tests
+- Shared x86_64 low-memory DMA mapping and bounce buffers with device-mask,
+  direction, exhaustion, overflow, copy-back, and ownership tests
+- A cross-architecture behavior-equivalence gate covering memory, scheduling,
+  hardware discovery, block I/O, input, graphics, persistence, networking, and
+  missing-device handling while preserving the complete 32-bit Ring 3 baseline
+- A versioned x86_64 syscall ABI contract with six-register argument passing,
+  stable errors, an ABI-query operation, and fixed-width public records
+- An x86_64 `syscall`/`sysret` entry path with a GS-owned kernel stack,
+  `swapgs`, saved user context, canonical lower-half return checks, and
+  sanitized return flags
+- Permission-aware x86_64 copy-to/from-user helpers that reject null,
+  supervisor, unmapped, overflowing, and noncanonical user pointers before
+  dereferencing them
+- A checksummed x86_64 persistent VFS record mounted at `/disk/state`, with
+  first-boot creation and second-boot recovery tests over the same disk image
+- 800x600 graphical desktop with a software compositor and mouse pointer
+- Interactive Network, Files, Terminal, and About windows
+- An in-desktop Ring 3 terminal with case-preserving text, PS/2 keyboard input,
+  Shift, Caps Lock, punctuation, Backspace, Enter, and command echo
+- Latched PS/2 mouse press events so quick clicks reliably open desktop windows
+- Preemptive multitasking plus isolated Ring 3 ELF32 processes
+- Ring 3 voluntary yield and timer-backed sleep syscalls
+- Explicit-frequency Ring 3 monotonic clock
+- Validated read-only CMOS wall-clock snapshots for Ring 3
+- Fixed-layout Ring 3 system and machine identity
+- Physical page allocation, paging, and a coalescing kernel heap
+- Writable RAM filesystem with files, directories, permissions, and `/dev`
+- Ring 3 checked creation and removal of empty RAMFS directories
+- Ownership-checked Ring 3 permission changes
+- Read-only Ring 3 process identity lookup
+- Generic block devices, a bounded write-back cache, and checked MBR partitions
+- Deterministic block-write fault injection for storage error-path tests
+- Boot-time proof that interrupted filesystem metadata commits fail closed
+- A small educational disk filesystem mounted through the VFS at `/disk`
+- Legacy VirtIO block support with an automated two-boot persistence test
+- Interactive serial command shell with file, memory, task, network, hardware,
+  and identity commands
+- Defensive ELF32 loader with separately built `/bin/hello` and `/bin/cat`
+  Ring 3 programs
+- Checked user file syscalls backed by process-owned descriptor tables
+- A versioned, single-source syscall-number ABI shared by kernel and Ring 3 assembly
+- Compile-time fixed-layout checks for every public syscall record
+- Shared-offset descriptor seeking with bounds checks
+- Checked path metadata lookup using fixed-width VFS records
+- Writable descriptor truncation with zero-filled persistent growth
+- Bounded argument stacks plus `spawn` and blocking `wait`
+- Inherited process groups with checked self/direct-child group management
+- Ring 3 command shell with event-driven keyboard and serial input
+- Reference-counted open files, inherited standard streams, and `dup2`
+- Separate Ring 3 `/bin/echo` and descriptor-lifecycle test programs
+- Bounded blocking pipes with EOF and peer-close wake-up behavior
+- Bounded multi-descriptor polling with timer deadlines
+- Atomic child descriptor actions, shell redirection, and two-process pipelines
+- Ring 3 `wc`, `ls`, `mem`, `uptime`, and `ps` commands
+- Page-backed userspace `brk` with reusable `malloc`/`free`/`calloc`/`realloc`
+- Selectable trusted recovery console from the GRUB menu
+- PS/2 keyboard and mouse input plus COM1 serial diagnostics
+- A bounded 4 KiB in-memory boot and diagnostic log
+- Checked Ring 3 access to bounded diagnostic-log snapshots
+- PCI device enumeration and ACPI RSDP/RSDT discovery
+- RTL8139 Ethernet with ARP, IPv4, ICMP ping, UDP, and DHCP
+- Capability-checked descriptor-backed Ring 3 UDP send/receive and polling
+- Stack-smashing protection, task identities, capabilities, and VFS permissions
+- Automated ELF, Multiboot, and headless QEMU boot tests
+- One `make test-all` gate for static, normal, missing-device, and storage profiles
+
+SplintOS is still an experimental educational OS. It cannot run Linux
+applications or use most real Wi-Fi, USB,
+audio, and GPU hardware. Its Ring 3 ELF32 environment remains intentionally
+small: pipelines are simple, and the C library is
+minimal. TCP, TLS, HTTP, additional filesystems, and modern hardware drivers
+remain future work; bounded DNS and persistent VirtIO storage are available.
+
+## Current 32-bit and 64-bit status
+
+The complete interactive operating-system profile is currently 32-bit. It owns
+the Ring 3 ELF32 programs, desktop, VFS and persistent filesystem, VirtIO
+storage, RTL8139 networking, and PS/2 input described below.
+
+The separate `x86_64` profile is a verified migration target, not yet the full
+desktop OS. It boots natively in long mode and includes CPU feature validation,
+GDT/TSS/IDT setup, four-level paging, 64-bit physical-memory and heap ownership,
+timer preemption, kernel-task switching, PCI/ACPI discovery, framebuffer and
+PS/2 input paths, RTL8139 networking with DHCP, VirtIO storage, persistent VFS
+recovery, and low-address DMA helpers. It also has a versioned syscall ABI,
+`syscall`/`sysret` entry, `swapgs`, safe return checks, and hardened user-copy
+validation. Per-process x86_64 address spaces, ELF64 programs, SplintLibc, and
+the complete Ring 3 desktop session remain Phase 2 work, so SplintOS is not yet
+a completely 64-bit operating system.
 
 ## Graphical desktop
 
 GRUB requests an 800x600 32-bit linear framebuffer. The kernel draws its own
 desktop UI without an external graphics library. The dashboard shows kernel,
-network, and graphics status and provides selectable Network, Files, and About
-buttons. Use Left/Right or Tab to move between buttons. VGA text mode remains a
-fallback if the boot environment cannot provide a compatible framebuffer.
+network, and graphics status and provides selectable Network, Files, Terminal,
+and About buttons. Use Left/Right or Tab to move between buttons. VGA text mode
+remains a fallback if the boot environment cannot provide a compatible
+framebuffer.
+
+After opening Files, use Up/Down to move the highlighted selection through the
+current directory. Press Enter to open the selected directory and Left to
+return to its parent. The current absolute path is shown above the listing;
+selection wraps between the first and last visible entries.
+
+Terminal displays the live Ring 3 `/bin/sh` session inside the SplintOS desktop.
+Open it, wait for `user>`, and type commands such as `ls /`, `cat /README`, or
+`cat /etc/motd`. Keyboard characters go through the same checked console queue
+as serial input. Press Left or click the title-bar close button to return to the
+desktop; COM1 remains available as a diagnostic mirror.
 
 The UI accepts PS/2 keyboard navigation and PS/2 mouse movement/clicks. The
 kernel also initializes COM1 as a serial diagnostics console; `make run` maps it
-to the launching terminal. The buttons are currently navigation elements only.
+to the launching terminal.
 
 ## Device support
 
@@ -25,11 +162,192 @@ PCIe, ACPI, storage, audio, GPU, Bluetooth, and vendor-driver projects. The
 device input layer in `include/devices.h` is the starting boundary for adding
 those drivers without coupling them directly to the desktop.
 
+## CPU and interrupt foundation
+
+The kernel installs its own flat kernel/user GDT, a 256-entry IDT, handlers for
+all 32 architectural CPU exceptions, and IRQ stubs for both legacy PICs. The
+8259 PIC is remapped away from exception vectors, and the PIT supplies a 100 Hz
+kernel tick. Keyboard, mouse, and serial input are dispatched from hardware
+IRQs. Fatal CPU
+exceptions stop the machine through a kernel panic path and report over VGA and
+COM1 serial output.
+
+## Memory management
+
+SplintOS reads the variable-length Multiboot physical-memory map and tracks up
+to 4 GiB of RAM with a 4 KiB page-frame bitmap. Kernel, low-memory, boot-info,
+and memory-map pages are reserved before allocation begins. Paging is enabled
+with an initial 4 GiB identity map using x86 4 MiB pages, which keeps legacy
+devices and the high physical framebuffer accessible during early development.
+
+The kernel also provides `physical_page_alloc`/`physical_page_free` and a 1 MiB
+coalescing heap through `kmalloc`/`kfree`. Page-fault panic reports include EIP,
+the CPU error code, and the CR2 faulting address over COM1. User processes have
+private address spaces and can grow a zeroed heap between `0x80000000` and
+`0x90000000` through `brk`.
+
+## Processes and scheduling
+
+SplintOS has fixed-size process control blocks, separately allocated 16 KiB
+kernel stacks, task creation/termination, sleeping, explicit yielding, and a
+preemptive round-robin scheduler. The 100 Hz timer changes saved interrupt
+frames every five ticks, producing a 20 Hz scheduling quantum. A maintenance
+kernel task is created during boot to exercise context switching and sleeping.
+
+Kernel services still use trusted Ring 0 tasks, while ELF32 applications run in
+private page directories with supervisor-only kernel mappings. The TSS provides
+kernel-entry stacks. Parent tracking, argument stacks, `spawn`, blocking `wait`,
+descriptor inheritance, and bounded pipes support the Ring 3 shell and commands.
+
+## Files and directories
+
+The virtual filesystem currently mounts a writable RAM filesystem at `/`. It
+supports absolute path resolution, directories, file creation, open/read/write,
+append, seek, close, and directory listing through integer file descriptors.
+Boot creates `/dev`, `/etc`, `/tmp`, `/etc/motd`, `/README`, `/dev/null`, and a
+serial output device at `/dev/serial`.
+
+RAM filesystem contents disappear when the machine powers off. A generic block
+layer, 16-sector write-back cache, checked MBR parser, and compact `SPLFS5`
+educational filesystem now run over `ramblk0`. `SPLFS5` is mounted at `/disk`;
+Ring 3 programs use normal file descriptors and can explicitly flush dirty
+blocks. The versioned `SPLFS5` layout stores eight flat files of at most 4 KiB
+each in dynamically placed contiguous extents. A checked allocation bitmap,
+metadata checksums, and clean/dirty transaction state detect allocation drift
+and interrupted metadata commits. A dirty image whose previous checksummed
+directory remains intact can be inspected through a strictly read-only mount.
+Fixed-width creation, content-modification, and metadata-change timestamps are
+persisted and available to Ring 3 through a compatible extended stat call.
+Validated legacy `SPLFS4` volumes are decoded with their original 44-byte entry
+layout and mounted strictly read-only; automated tests prove boot changes no bytes.
+A legacy VirtIO block
+driver provides persistent storage under QEMU; `ramblk0` remains the fallback
+and deterministic conformance device. Unknown hardware partitions are probed
+read-only and never formatted automatically. Checked `unlink` removes closed
+files and makes their directory slots and extents reusable; same-directory `rename` preserves
+the source extent and can atomically replace a closed destination through one
+flushed metadata-sector update.
+
+The storage integration suite also boots deterministic images containing an
+unknown filesystem, overlapping extents, and an out-of-range extent. Each must
+be rejected, and a full-image SHA-256 comparison proves the probe wrote nothing.
+
+## Built-in applications
+
+The default interactive shell is `/bin/sh`. It is available inside the graphical
+desktop through Terminal and is mirrored to QEMU's `-serial stdio` diagnostics
+console. PS/2 and serial input feed the same blocking console queue. The shell
+launches ELF programs, passes arguments, redirects output with `>`, and supports
+one `producer | consumer` pipeline.
+
+The old trusted kernel commands remain available only through the recovery boot
+entry. Normal programs include `sh`, `cat`, `echo`, `wc`, `ls`, `mem`, `uptime`,
+`ps`, and `disk`. The kernel has per-process page tables, user-pointer
+validation, a defensive ELF32 loader, and checked file and process syscalls.
+The default `/bin/sh` shell runs in Ring 3, executes `/bin/cat /README` through
+`spawn` and `wait`, and blocks on descriptor `0` until keyboard or serial input
+arrives. Standard streams are inherited through reference-counted open-file
+objects, and `dup2` supports safe replacement. Child descriptor actions power
+shell redirection and pipelines. `/bin/pipetest` verifies blocking and EOF.
+
+Useful terminal commands include:
+
+```text
+ls /
+ls /bin
+cat
+cat /README
+cat /etc/motd
+echo Hello SplintOS
+echo saved-text > /tmp/test
+cat /tmp/test
+cat /README | wc
+mem
+uptime
+ps
+heaptest
+fdtest
+pipetest
+disk
+hello
+```
+
+Paths are case-sensitive. `cat` without an argument reads `/README`; failed
+opens and reads produce an explicit diagnostic.
+
+## UDP and DHCP
+
+The network layer maintains a small learned ARP cache, can issue ARP requests,
+demultiplexes incoming UDP datagrams by local port, and provides eight bounded
+UDP sockets with send/receive operations. DHCP discovery starts when RTL8139
+initialization completes; offers trigger a request and acknowledgements replace
+the `10.0.2.15` fallback address.
+IPv4 loopback delivery supports deterministic local UDP tests without a peer.
+DHCP also supplies subnet, gateway, and DNS state used for next-hop routing and
+available to Ring 3 through a fixed-layout configuration snapshot. The trusted
+recovery console's `net` command reports the kernel network state.
+
+UDP payloads are capped at 512 bytes with four queued datagrams per socket.
+Passing local port zero requests a collision-checked ephemeral port from the
+IANA dynamic range, which client libraries such as DNS use automatically.
+The userspace library includes a bounded IPv4 DNS resolver. It validates labels,
+uses the DHCP-provided server, retries while ARP resolution settles, waits with a
+finite poll timeout, and accepts only checked A/IN answers. Routing tables, TCP,
+TLS, Wi-Fi, and HTTP remain later networking milestones.
+
+## Hardware discovery
+
+A shared PCI subsystem enumerates all buses, slots, and functions, including
+multifunction devices. It records vendor/device IDs, class/subclass, programming
+interface, six BAR values, and legacy interrupt lines. Drivers can safely enable
+I/O, memory decoding, and bus mastering through the common API; RTL8139 now uses
+this layer instead of maintaining a private PCI scanner.
+
+The ACPI bootstrap searches the EBDA and BIOS region for a checksummed RSDP,
+validates the RSDT, and reports its table count. Run `devices` in the trusted
+recovery console to inspect discovered hardware. ACPI table interpretation,
+PCIe ECAM, xHCI USB, AHCI/NVMe, audio, Wi-Fi, and accelerated graphics require
+dedicated drivers on top of this discovery layer.
+
+## Software compositor and windows
+
+Graphics render into an aligned 800x600 off-screen backbuffer. Dirty rectangles
+copy only changed regions into the physical framebuffer, preventing visible
+tearing during pointer and widget updates. The desktop includes reusable text,
+rectangle, button, title-bar, and window-frame primitives.
+
+Network, Files, Terminal, and About open real overlay windows through Enter or
+latched mouse clicks. Files provides keyboard navigation across VFS directories:
+Up/Down selects an entry, Enter opens a selected directory, and Left returns to
+the parent. Terminal displays the live Ring 3 shell with case-preserving text.
+Network shows stack state, and About identifies the project. Enter closes the
+Network and About windows; Left closes Terminal, and the red title-bar button
+closes every window. This is a software compositor; accelerated GPU commands,
+scalable fonts, image codecs, and video surfaces are later graphics milestones.
+
+## Security foundation
+
+All C translation units use strong compiler stack protection with a boot-time
+TSC-seeded global canary; corruption stops the CPU and reports over serial.
+Scheduler tasks carry inherited user IDs, and a capability layer controls
+privileged identity, permission, device, and network-administration operations.
+
+VFS nodes now store owners and Unix-style mode bits. Open, create, read, write,
+device access, and `chmod` enforce those permissions; `/tmp` is intentionally
+world-writable while system files remain root-owned. Security-sensitive changes
+emit serial audit records, and the recovery console's `whoami` command displays
+the trusted shell task identity.
+
+The 32-bit profile has Ring 3 address-space isolation, but this remains an
+educational security foundation rather than a hardened production boundary.
+Complete x86_64 process isolation, ASLR, password authentication, cryptographic
+randomness, and driver isolation remain roadmap work.
+
 ## Networking
 
-The kernel currently supports Ethernet receive/transmit, ARP replies, IPv4
-validation, and ICMP echo replies (ping). Its address is statically configured
-as `10.0.2.15/24`, matching QEMU's usual user-network subnet.
+The kernel currently supports interrupt-driven Ethernet receive/transmit, an
+ARP cache, IPv4 validation, ICMP echo replies, UDP sockets, and DHCP. It uses
+`10.0.2.15/24` as a fallback address, matching QEMU's usual user-network subnet.
 
 Start QEMU with an RTL8139 adapter:
 
@@ -37,8 +355,7 @@ Start QEMU with an RTL8139 adapter:
 qemu-system-i386 -cdrom build/splintos.iso -nic user,model=rtl8139
 ```
 
-Networking is polling-based because interrupt handling has not been added yet.
-There is no DHCP, DNS, UDP, TCP, or sockets API at this stage.
+DNS, TCP, TLS, HTTP, and Wi-Fi are not implemented yet.
 
 ## Build
 
@@ -48,12 +365,45 @@ Requirements: GNU Make, GCC with 32-bit code-generation support, and GNU ld.
 make
 ```
 
-The freestanding kernel binary is written to `build/splintos.bin`. If
+Build and boot-test the experimental 64-bit foundation with:
+
+```sh
+make test-x86_64
+```
+
+Compare the preserved 32-bit profile with the x86_64 foundation contracts:
+
+```sh
+make test-equivalence
+```
+
+For a dedicated cross-compiler, set its prefix explicitly:
+
+```sh
+make CROSS=i686-elf-
+```
+
+The freestanding kernel binary is written to `build/splintos.bin`, and the
+separately linked Ring 3 programs are written under `build/user/`. If
 `grub-file` is installed, verify its Multiboot header with:
 
 ```sh
 make check
 ```
+
+`make test` verifies the Multiboot header, ELF formats, entry address, required
+symbols, and absence of unresolved references. `make test-boot` creates the ISO,
+boots it headlessly, and asserts serial milestones without a panic.
+`make test-storage` performs persistent VirtIO boots and non-destructive probes
+of unknown, structurally corrupt, checksum-invalid, and bitmap-invalid images,
+plus hash-verified read-only recovery of safe dirty images. Boundary fixtures
+distinguish recoverable bitmap drift from unsafe directory drift.
+`make debug` waits for GDB on TCP port 1234.
+
+GitHub Actions runs both static and headless boot checks. See
+[documentation index](docs/README.md) for the development contract,
+architecture, roadmap, build history, and hardware support matrix. The project
+is distributed under the MIT License.
 
 ## Create and run the bootable ISO
 
@@ -64,16 +414,56 @@ make iso
 make run
 ```
 
+The Makefile launches system QEMU through `scripts/qemu-clean.sh`, preserving
+only the desktop-session variables it needs. This prevents Snap-provided GTK,
+GIO, and glibc paths from injecting incompatible `core20` libraries when the
+terminal was opened from a Snap-packaged IDE.
+
+### VirtualBox input configuration
+
+SplintOS currently owns the legacy PS/2 controller and 8259 PIC; it does not yet
+include USB HID or I/O APIC drivers. Power the virtual machine off completely,
+then configure VirtualBox as follows before attaching `build/splintos.iso`:
+
+- System > Motherboard > Pointing Device: **PS/2 Mouse**
+- System > Motherboard > Extended Features: disable **I/O APIC**
+- System > Processor: use one virtual CPU
+- USB: disable the USB controller or ensure no USB tablet is selected
+
+Click inside the running VM to capture its keyboard and relative mouse; use the
+configured VirtualBox Host key to release them. SplintOS handles PS/2 keyboard
+and mouse input through IRQs and an IRQ-independent polling fallback for
+hypervisors with different legacy interrupt delivery.
+
 On Debian/Ubuntu, the relevant packages are commonly `gcc-multilib`,
-`grub-pc-bin`, `xorriso`, and `qemu-system-x86`.
+`grub-pc-bin`, `mtools`, `xorriso`, and `qemu-system-x86`:
+
+```sh
+sudo apt-get install gcc-multilib grub-pc-bin mtools xorriso qemu-system-x86
+```
+
+## Contributions welcome
+
+SplintOS is ready to welcome contributors from around the globe. Whether you are
+learning operating-system development or bringing experience in kernels,
+drivers, filesystems, networking, testing, documentation, or user interfaces,
+your ideas and contributions are welcome. Review the project documentation and
+roadmap, choose a small testable milestone, and open an issue or pull request to
+collaborate.
+
+I’m ready to collaborate on ideas, features, documentation, and contributions.
+Contact me at [mokhtargalaxy06@gmail.com](mailto:mokhtargalaxy06@gmail.com).
 
 ## Project layout
 
-- `src/boot.S` contains the Multiboot header and assembly entry point.
-- `src/kernel.c` contains the first kernel code and VGA text driver.
-- `linker.ld` lays the kernel out at the 1 MiB physical address.
-- `grub/grub.cfg` defines the bootloader entry.
+- `src/` contains kernel and architecture implementation code.
+- `include/` contains kernel subsystem interfaces.
+- `user/` contains the Ring 3 runtime, libc subset, linker script, and programs.
+- `grub/` contains normal and recovery boot entries.
+- `scripts/` contains static, boot, storage, and QEMU launch tooling.
+- `docs/` contains maintained design, support, and style documentation.
+- `Makefile` builds the kernel, user ELF files, ISO, and verification targets.
 
-This is a real kernel foundation, but not yet a general-purpose operating
-system. Useful next steps are a GDT/IDT, interrupt-driven networking, physical
-memory management, paging, DHCP, UDP/TCP, keyboard input, and a command shell.
+SplintOS is an educational operating system, not yet a general-purpose desktop.
+See [NEXT_STEP.md](NEXT_STEP.md) for the immediate milestone and
+[NEXT_STEPS.md](NEXT_STEPS.md) for the longer roadmap.
